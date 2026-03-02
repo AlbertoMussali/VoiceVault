@@ -9,13 +9,15 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.jobs import JOB_REGISTRY, enqueue_registered_job, run_stub_job
+from app.jobs import JOB_REGISTRY, enqueue_registered_job, run_brag_text_export_job, run_stub_job
 
 
 class JobRegistryTests(unittest.TestCase):
     def test_stub_job_is_registered(self) -> None:
         self.assertIn("stub.echo", JOB_REGISTRY)
         self.assertEqual(JOB_REGISTRY["stub.echo"]("hello"), {"status": "ok", "payload": "hello"})
+        self.assertIn("brag.export_text_v1", JOB_REGISTRY)
+        self.assertIs(JOB_REGISTRY["brag.export_text_v1"], run_brag_text_export_job)
 
     def test_enqueue_registered_job_uses_default_queue(self) -> None:
         fake_queue = MagicMock()

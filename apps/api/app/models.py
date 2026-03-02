@@ -37,6 +37,9 @@ class User(Base):
 
     entries: Mapped[list["Entry"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     tags: Mapped[list["Tag"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    brag_bullets: Mapped[list["BragBullet"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    citations: Mapped[list["Citation"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    export_jobs: Mapped[list["ExportJob"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     refresh_sessions: Mapped[list["RefreshSession"]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
@@ -104,6 +107,7 @@ class Transcript(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     entry: Mapped["Entry"] = relationship(back_populates="transcript_versions")
+    citations: Mapped[list["Citation"]] = relationship(back_populates="transcript")
 
 
 class AudioAsset(Base):
@@ -167,6 +171,98 @@ class EntryTag(Base):
 
     entry: Mapped["Entry"] = relationship(back_populates="entry_tags")
     tag: Mapped["Tag"] = relationship(back_populates="entry_tags")
+
+
+class BragBullet(Base):
+    __tablename__ = "brag_bullets"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    bucket: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    bullet_text: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+
+    user: Mapped["User"] = relationship(back_populates="brag_bullets")
+    citation_links: Mapped[list["BragBulletCitation"]] = relationship(back_populates="bullet", cascade="all, delete-orphan")
+
+
+class Citation(Base):
+    __tablename__ = "citations"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    transcript_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("transcripts.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    transcript_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    start_char: Mapped[int] = mapped_column(Integer, nullable=False)
+    end_char: Mapped[int] = mapped_column(Integer, nullable=False)
+    quote_text: Mapped[str] = mapped_column(Text, nullable=False)
+    snippet_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), index=True)
+
+    user: Mapped["User"] = relationship(back_populates="citations")
+    transcript: Mapped["Transcript"] = relationship(back_populates="citations")
+    brag_bullet_links: Mapped[list["BragBulletCitation"]] = relationship(back_populates="citation", cascade="all, delete-orphan")
+
+
+class BragBulletCitation(Base):
+    __tablename__ = "brag_bullet_citations"
+    __table_args__ = (UniqueConstraint("bullet_id", "citation_id", name="uq_brag_bullet_citations_bullet_citation"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    bullet_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("brag_bullets.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    citation_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("citations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    bullet: Mapped["BragBullet"] = relationship(back_populates="citation_links")
+    citation: Mapped["Citation"] = relationship(back_populates="brag_bullet_links")
+
+
+class ExportJob(Base):
+    __tablename__ = "export_jobs"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    export_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    format: Mapped[str] = mapped_column(String(16), nullable=False, default="txt")
+    artifact_storage_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metadata_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+
+    user: Mapped["User"] = relationship(back_populates="export_jobs")
 
 
 class AuditLog(Base):

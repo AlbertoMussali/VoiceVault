@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 
 import { useAuth } from '@/auth/AuthProvider';
 import { Button } from '@/components/ui/Button';
+import { listBragDrafts, updateBragDraft, type BragDraft } from '@/lib/bragDrafts';
 import {
   EntryApiError,
   createEntry,
@@ -47,6 +48,8 @@ const INDEXING_STORAGE_KEY = 'voicevault.entry-indexing.v1';
 const TIMELINE_STORAGE_KEY = 'voicevault.timeline.v1';
 const ENTRY_TYPE_OPTIONS = ['win', 'blocker', 'idea', 'task', 'learning'];
 const MAX_QUOTE_CHARS = 160;
+const BRAG_BUCKETS = ['Impact', 'Execution', 'Leadership', 'Collaboration', 'Growth'] as const;
+const BRAG_UNASSIGNED_BUCKET = 'Unassigned';
 
 function normalizeQuote(raw: string | null | undefined): string | null {
   if (typeof raw !== 'string') {
@@ -106,6 +109,19 @@ function parseTags(rawTags: string): string[] {
     .slice(0, 10);
 
   return Array.from(new Set(next));
+}
+
+function isKnownBragBucket(bucket: string | null): bucket is (typeof BRAG_BUCKETS)[number] {
+  return typeof bucket === 'string' && BRAG_BUCKETS.includes(bucket as (typeof BRAG_BUCKETS)[number]);
+}
+
+function formatBragDate(raw: string): string {
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) {
+    return 'Unknown date';
+  }
+
+  return date.toLocaleDateString();
 }
 
 function readStoredIndexing(): Record<string, EntryIndexingData> {
@@ -317,6 +333,10 @@ export function AppPage() {
   const [timelineTypeFilter, setTimelineTypeFilter] = useState<'all' | string>('all');
   const [timelineContextFilter, setTimelineContextFilter] = useState<'all' | EntryContext>('all');
   const [timelineTagFilterInput, setTimelineTagFilterInput] = useState('');
+  const [bragDateFrom, setBragDateFrom] = useState('');
+  const [bragDateTo, setBragDateTo] = useState('');
+  const [bragDrafts, setBragDrafts] = useState<BragDraft[]>(() => listBragDrafts());
+  const [expandedEvidenceByDraft, setExpandedEvidenceByDraft] = useState<Record<string, boolean>>({});
   const [searchQueryInput, setSearchQueryInput] = useState('');
   const [submittedSearchQuery, setSubmittedSearchQuery] = useState('');
   const [isSearchLoading, setIsSearchLoading] = useState(false);
@@ -864,6 +884,24 @@ export function AppPage() {
     setIsIndexingModalOpen(false);
   }
 
+  function handleBragClaimTextChange(draftId: string, value: string) {
+    setBragDrafts((previous) => previous.map((draft) => (draft.id === draftId ? { ...draft, claimText: value } : draft)));
+    updateBragDraft(draftId, { claimText: value });
+  }
+
+  function handleBragBucketChange(draftId: string, bucketValue: string) {
+    const nextBucket = bucketValue === '' ? null : bucketValue;
+    setBragDrafts((previous) => previous.map((draft) => (draft.id === draftId ? { ...draft, bucket: nextBucket } : draft)));
+    updateBragDraft(draftId, { bucket: nextBucket });
+  }
+
+  function toggleEvidenceList(draftId: string) {
+    setExpandedEvidenceByDraft((previous) => ({
+      ...previous,
+      [draftId]: !previous[draftId]
+    }));
+  }
+
   const isBusy = pipelineState === 'creating' || pipelineState === 'uploading' || pipelineState === 'transcribing';
   const currentIndexing = entryId ? indexingByEntry[entryId] : null;
   const retryLabel =
@@ -912,6 +950,39 @@ export function AppPage() {
 
     return true;
   });
+  const bragDraftsInRange = bragDrafts.filter((draft) => {
+    const date = new Date(draft.createdAt);
+    if (Number.isNaN(date.getTime())) {
+      return false;
+    }
+
+    const day = date.toISOString().slice(0, 10);
+    if (bragDateFrom && day < bragDateFrom) {
+      return false;
+    }
+    if (bragDateTo && day > bragDateTo) {
+      return false;
+    }
+
+    return true;
+  });
+  const bragDraftsByBucket = useMemo(() => {
+    const byBucket: Record<string, BragDraft[]> = {};
+    for (const bucket of BRAG_BUCKETS) {
+      byBucket[bucket] = [];
+    }
+    byBucket[BRAG_UNASSIGNED_BUCKET] = [];
+
+    for (const draft of bragDraftsInRange) {
+      if (isKnownBragBucket(draft.bucket)) {
+        byBucket[draft.bucket].push(draft);
+        continue;
+      }
+      byBucket[BRAG_UNASSIGNED_BUCKET].push(draft);
+    }
+
+    return byBucket;
+  }, [bragDraftsInRange]);
   const hasSearchAttempt = useMemo(() => submittedSearchQuery.length > 0, [submittedSearchQuery]);
 
   return (
@@ -1138,6 +1209,114 @@ export function AppPage() {
           {hasSearchAttempt && !isSearchLoading && !searchError && searchResults.length === 0 ? (
             <p className="text-sm text-muted-foreground">No matches found for "{submittedSearchQuery}".</p>
           ) : null}
+        </div>
+        <div className="mt-6 space-y-4 rounded-md border bg-background p-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h2 className="text-base font-semibold">Brag Doc</h2>
+            <span className="text-xs text-muted-foreground">{bragDraftsInRange.length} bullets in range</span>
+          </div>
+          <p className="text-sm text-muted-foreground">Select a date range and organize evidence-backed bullets by bucket.</p>
+          <div className="grid gap-3 md:grid-cols-2">
+            <label className="space-y-1 text-sm">
+              <span className="font-medium">Date from</span>
+              <input
+                type="date"
+                value={bragDateFrom}
+                onChange={(event) => setBragDateFrom(event.target.value)}
+                className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+              />
+            </label>
+            <label className="space-y-1 text-sm">
+              <span className="font-medium">Date to</span>
+              <input
+                type="date"
+                value={bragDateTo}
+                onChange={(event) => setBragDateTo(event.target.value)}
+                className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+              />
+            </label>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                setBragDateFrom('');
+                setBragDateTo('');
+              }}
+            >
+              Clear range
+            </Button>
+          </div>
+          <div className="space-y-3">
+            {[...BRAG_BUCKETS, BRAG_UNASSIGNED_BUCKET].map((bucket) => (
+              <article key={bucket} className="rounded-md border p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h3 className="text-sm font-semibold">{bucket}</h3>
+                  <span className="text-xs text-muted-foreground">{bragDraftsByBucket[bucket].length} bullets</span>
+                </div>
+                {bragDraftsByBucket[bucket].length === 0 ? (
+                  <p className="mt-1 text-xs text-muted-foreground">No bullets yet. Add evidence from entries to start this bucket.</p>
+                ) : (
+                  <div className="mt-3 space-y-3">
+                    {bragDraftsByBucket[bucket].map((draft) => {
+                      const isEvidenceExpanded = Boolean(expandedEvidenceByDraft[draft.id]);
+                      const evidenceCount = draft.evidence.length;
+                      return (
+                        <div key={draft.id} className="rounded border bg-muted/20 p-3">
+                          <textarea
+                            value={draft.claimText}
+                            onChange={(event) => handleBragClaimTextChange(draft.id, event.target.value)}
+                            placeholder="Write an impact claim..."
+                            className="min-h-20 w-full rounded-md border bg-background p-2 text-sm"
+                          />
+                          <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+                            <span className="text-xs text-muted-foreground">
+                              {evidenceCount} {evidenceCount === 1 ? 'source' : 'sources'}
+                            </span>
+                            <Button size="sm" variant="outline" onClick={() => toggleEvidenceList(draft.id)}>
+                              {isEvidenceExpanded ? 'Hide evidence' : 'Show evidence'}
+                            </Button>
+                          </div>
+                          <div className="mt-2">
+                            <label className="space-y-1 text-xs">
+                              <span className="font-medium">Bucket</span>
+                              <select
+                                value={isKnownBragBucket(draft.bucket) ? draft.bucket : ''}
+                                onChange={(event) => handleBragBucketChange(draft.id, event.target.value)}
+                                className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                              >
+                                <option value="">Unassigned</option>
+                                {BRAG_BUCKETS.map((option) => (
+                                  <option key={option} value={option}>
+                                    {option}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                          </div>
+                          <p className="mt-2 text-xs text-muted-foreground">Added {formatBragDate(draft.createdAt)}</p>
+                          {isEvidenceExpanded ? (
+                            <div className="mt-2 space-y-2 rounded-md border bg-background p-2">
+                              {draft.evidence.map((evidence, evidenceIndex) => (
+                                <div key={`${draft.id}-${evidence.entryId}-${evidence.startChar}-${evidenceIndex}`} className="rounded border p-2">
+                                  <p className="text-xs text-muted-foreground">
+                                    Entry {evidence.entryId} | Transcript v{evidence.transcriptVersion ?? 'n/a'} | Chars {evidence.startChar}-
+                                    {evidence.endChar}
+                                  </p>
+                                  <p className="mt-1 text-sm">{evidence.snippetText}</p>
+                                </div>
+                              ))}
+                            </div>
+                          ) : null}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </article>
+            ))}
+          </div>
         </div>
         <div className="mt-6 space-y-4 rounded-md border bg-background p-4">
           <div className="flex flex-wrap items-center justify-between gap-3">

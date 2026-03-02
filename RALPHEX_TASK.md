@@ -183,17 +183,17 @@ Notes:
 
 ## Phase 5 — Brag Doc v0 (career wedge, exportable)
 
-- [ ] [FE] Implement Brag Doc UI skeleton (buckets + date range selector). <!-- group: 600 -->
+- [x] [FE] Implement Brag Doc UI skeleton (buckets + date range selector). <!-- group: 600 -->
   - Done when: buckets render: Impact/Execution/Leadership/Collaboration/Growth.
-- [ ] [BE] Implement brag bullet CRUD endpoints. <!-- group: 600 -->
+- [x] [BE] Implement brag bullet CRUD endpoints. <!-- group: 600 -->
   - Done when: bullets persist, update, delete, list by bucket.
-- [ ] [FE] Implement “Add to Brag” from entry detail using selected highlight/snippet. <!-- group: 600 -->
+- [x] [FE] Implement “Add to Brag” from entry detail using selected highlight/snippet. <!-- group: 600 -->
   - Done when: creates bullet draft linked to evidence.
-- [ ] [BE] Implement citation creation endpoint validating offsets vs transcript version. <!-- group: 600 -->
+- [x] [BE] Implement citation creation endpoint validating offsets vs transcript version. <!-- group: 600 -->
   - Done when: invalid offsets rejected; citations immutable to source version.
-- [ ] [FE] Implement bullet editor showing sources count + expandable evidence list. <!-- group: 600 -->
+- [x] [FE] Implement bullet editor showing sources count + expandable evidence list. <!-- group: 600 -->
   - Done when: user can edit claim text without losing citations.
-- [ ] [BE] Implement text export job producing downloadable report with dated quotes. <!-- group: 600 -->
+- [x] [BE] Implement text export job producing downloadable report with dated quotes. <!-- group: 600 -->
   - Done when: export is reproducible and stored as a job artifact.
 - [ ] [FE] Implement export UI (request → status → download). <!-- group: 600 -->
   - Done when: user can generate and download export without manual ops.

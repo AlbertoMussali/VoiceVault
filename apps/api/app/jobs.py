@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_sessionmaker
 from app.entry_titles import deterministic_title_from_transcript, fallback_entry_title
-from app.models import AuditLog, AudioAsset, Entry, Transcript
+from app.models import AuditLog, AudioAsset, BragBullet, Entry, ExportJob, Transcript
 from app.openai_stt import transcribe_audio_bytes
 from app.settings import get_redis_url, get_settings
 from app.storage import get_storage_backend
@@ -90,10 +90,64 @@ def run_transcription_job(entry_id: str, audio_asset_id: str | None = None) -> d
         session.close()
 
 
+def run_brag_text_export_job(export_job_id: str) -> dict[str, Any]:
+    """Render a deterministic text brag report and store it as an artifact."""
+    export_job_uuid = _parse_uuid(export_job_id, field_name="export_job_id")
+
+    session = get_sessionmaker()()
+    try:
+        export_job = session.get(ExportJob, export_job_uuid)
+        if export_job is None:
+            raise ValueError(f"Export job not found: {export_job_uuid}")
+
+        export_job.status = "processing"
+        export_job.error_message = None
+        session.commit()
+
+        bullets = (
+            session.execute(
+                select(BragBullet)
+                .where(BragBullet.user_id == export_job.user_id)
+                .order_by(BragBullet.created_at.asc(), BragBullet.id.asc())
+            )
+            .scalars()
+            .all()
+        )
+        report_text = _build_brag_text_report(bullets)
+        storage_key = f"exports/brag/{export_job.user_id}/{export_job.id}/report.txt"
+        get_storage_backend().put(storage_key, report_text.encode("utf-8"))
+
+        export_job.status = "completed"
+        export_job.artifact_storage_key = storage_key
+        export_job.metadata_json = {
+            "bullet_count": len(bullets),
+            "file_name": "voicevault-brag-report.txt",
+        }
+        session.commit()
+
+        return {
+            "status": "ok",
+            "export_job_id": str(export_job.id),
+            "artifact_storage_key": storage_key,
+            "bullet_count": len(bullets),
+        }
+    except Exception as exc:
+        session.rollback()
+        export_job = session.get(ExportJob, export_job_uuid)
+        if export_job is not None:
+            export_job.status = "failed"
+            export_job.error_message = str(exc)[:2000]
+            session.commit()
+        raise
+    finally:
+        session.close()
+
+
 JOB_REGISTRY: dict[str, Callable[..., Any]] = {
     "stub.echo": run_stub_job,
     "transcription.process_entry_audio": run_transcription_job,
     "transcription.openai_stt_v1": run_transcription_job,
+    "brag.export_text_v1": run_brag_text_export_job,
 }
 
 
@@ -170,3 +224,41 @@ def _write_audit_event(
             )
         )
         audit_session.commit()
+
+
+def _build_brag_text_report(bullets: list[BragBullet]) -> str:
+    bucket_titles = {
+        "impact": "Impact",
+        "execution": "Execution",
+        "leadership": "Leadership",
+        "collaboration": "Collaboration",
+        "growth": "Growth",
+    }
+    bucket_order = ["impact", "execution", "leadership", "collaboration", "growth"]
+
+    lines = [
+        "VoiceVault Brag Report",
+        "",
+        "Dated Quotes",
+        "",
+    ]
+
+    if not bullets:
+        lines.append("No brag bullets available.")
+        return "\n".join(lines) + "\n"
+
+    grouped: dict[str, list[BragBullet]] = {bucket: [] for bucket in bucket_order}
+    for bullet in bullets:
+        grouped.setdefault(bullet.bucket, []).append(bullet)
+
+    for bucket in bucket_order:
+        bucket_bullets = grouped.get(bucket, [])
+        if not bucket_bullets:
+            continue
+        lines.append(f"{bucket_titles[bucket]}")
+        for bullet in bucket_bullets:
+            quote = " ".join(segment.strip() for segment in bullet.bullet_text.splitlines()).strip()
+            lines.append(f'- [{bullet.created_at.date().isoformat()}] "{quote}"')
+        lines.append("")
+
+    return "\n".join(lines).rstrip() + "\n"

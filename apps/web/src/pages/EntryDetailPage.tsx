@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 
 import { Button } from '@/components/ui/Button';
+import { createBragDraftFromSnippet } from '@/lib/bragDrafts';
 import { EntryApiError, fetchEntryAudioBlob, fetchEntryDetail, type EntryDetail } from '@/lib/entries';
 
 type AudioState = {
@@ -12,6 +13,10 @@ type AudioState = {
 type HighlightRange = {
   start: number;
   end: number;
+};
+
+type TranscriptSnippet = HighlightRange & {
+  text: string;
 };
 
 function parseHighlightRange(searchParams: URLSearchParams): HighlightRange | null {
@@ -54,6 +59,52 @@ function buildEntryErrorMessage(error: unknown): string {
   return 'Failed to load entry details.';
 }
 
+function normalizeSnippetText(value: string): string {
+  return value.replace(/\s+/g, ' ').trim();
+}
+
+function getSelectedSnippet(container: HTMLElement, transcriptText: string): TranscriptSnippet | null {
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0 || selection.isCollapsed) {
+    return null;
+  }
+
+  const range = selection.getRangeAt(0);
+  if (!container.contains(range.commonAncestorContainer)) {
+    return null;
+  }
+
+  const selectedRaw = selection.toString();
+  if (!selectedRaw) {
+    return null;
+  }
+
+  const prefixRange = document.createRange();
+  prefixRange.selectNodeContents(container);
+  try {
+    prefixRange.setEnd(range.startContainer, range.startOffset);
+  } catch {
+    return null;
+  }
+
+  const start = prefixRange.toString().length;
+  if (start < 0 || start >= transcriptText.length) {
+    return null;
+  }
+
+  const end = Math.min(start + selectedRaw.length, transcriptText.length);
+  if (end <= start) {
+    return null;
+  }
+
+  const text = normalizeSnippetText(transcriptText.slice(start, end));
+  if (!text) {
+    return null;
+  }
+
+  return { start, end, text };
+}
+
 export function EntryDetailPage() {
   const { entryId } = useParams<{ entryId: string }>();
   const navigate = useNavigate();
@@ -63,6 +114,10 @@ export function EntryDetailPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [audioState, setAudioState] = useState<AudioState>({ src: null, isObjectUrl: false });
+  const [selectedSnippet, setSelectedSnippet] = useState<TranscriptSnippet | null>(null);
+  const [bragNotice, setBragNotice] = useState<string | null>(null);
+  const [bragError, setBragError] = useState<string | null>(null);
+  const transcriptRef = useRef<HTMLElement | null>(null);
   const highlightRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
@@ -156,6 +211,23 @@ export function EntryDetailPage() {
 
     return { start: highlightRange.start, end: safeEnd };
   }, [highlightRange, transcriptText]);
+  const highlightedSnippet = useMemo(() => {
+    if (!transcriptText || !clampedHighlightRange) {
+      return null;
+    }
+
+    const text = normalizeSnippetText(transcriptText.slice(clampedHighlightRange.start, clampedHighlightRange.end));
+    if (!text) {
+      return null;
+    }
+
+    return {
+      start: clampedHighlightRange.start,
+      end: clampedHighlightRange.end,
+      text
+    };
+  }, [clampedHighlightRange, transcriptText]);
+  const activeSnippet = selectedSnippet ?? highlightedSnippet;
 
   useEffect(() => {
     if (!clampedHighlightRange) {
@@ -175,6 +247,50 @@ export function EntryDetailPage() {
       window.cancelAnimationFrame(frame);
     };
   }, [clampedHighlightRange, transcriptText]);
+
+  useEffect(() => {
+    setSelectedSnippet(null);
+    setBragNotice(null);
+    setBragError(null);
+  }, [entry?.entryId, transcriptText]);
+
+  function handleTranscriptSelection() {
+    if (!transcriptText || !transcriptRef.current) {
+      return;
+    }
+
+    const snippet = getSelectedSnippet(transcriptRef.current, transcriptText);
+    if (!snippet) {
+      return;
+    }
+
+    setSelectedSnippet(snippet);
+    setBragNotice(null);
+    setBragError(null);
+  }
+
+  function handleAddToBrag() {
+    if (!entry || !activeSnippet) {
+      setBragError('Select transcript text or open from a highlighted snippet first.');
+      setBragNotice(null);
+      return;
+    }
+
+    try {
+      createBragDraftFromSnippet({
+        entryId: entry.entryId,
+        transcriptVersion: entry.transcript?.version ?? null,
+        startChar: activeSnippet.start,
+        endChar: activeSnippet.end,
+        snippetText: activeSnippet.text
+      });
+      setBragError(null);
+      setBragNotice(`Saved draft from chars ${activeSnippet.start}-${activeSnippet.end}.`);
+    } catch (error) {
+      setBragNotice(null);
+      setBragError(error instanceof Error ? error.message : 'Failed to add draft to Brag.');
+    }
+  }
 
   return (
     <main className="min-h-screen bg-gradient-to-br from-sky-50 via-cyan-50 to-emerald-100 p-6">
@@ -215,7 +331,12 @@ export function EntryDetailPage() {
             </section>
 
             <section className="mt-6 rounded-md border bg-background p-4">
-              <h2 className="text-base font-semibold">Transcript</h2>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <h2 className="text-base font-semibold">Transcript</h2>
+                <Button onClick={handleAddToBrag} disabled={!activeSnippet} size="sm" variant="outline">
+                  Add to Brag
+                </Button>
+              </div>
               {clampedHighlightRange ? (
                 <p className="mt-2 text-xs text-muted-foreground">
                   Highlighted match
@@ -223,8 +344,17 @@ export function EntryDetailPage() {
                   {clampedHighlightRange.start}-{clampedHighlightRange.end}
                 </p>
               ) : null}
+              {selectedSnippet ? (
+                <p className="mt-2 text-xs text-muted-foreground">
+                  Selected snippet: {selectedSnippet.start}-{selectedSnippet.end}
+                </p>
+              ) : null}
               {transcriptText ? (
-                <pre className="mt-3 whitespace-pre-wrap break-words text-sm leading-6 text-foreground">
+                <pre
+                  ref={transcriptRef}
+                  className="mt-3 whitespace-pre-wrap break-words text-sm leading-6 text-foreground"
+                  onMouseUp={handleTranscriptSelection}
+                >
                   {clampedHighlightRange ? (
                     <>
                       {transcriptText.slice(0, clampedHighlightRange.start)}
@@ -243,6 +373,8 @@ export function EntryDetailPage() {
               ) : (
                 <p className="mt-3 text-sm text-muted-foreground">Transcript is not available yet for this entry.</p>
               )}
+              {bragNotice ? <p className="mt-3 text-sm text-emerald-700">{bragNotice}</p> : null}
+              {bragError ? <p className="mt-3 text-sm text-destructive">{bragError}</p> : null}
             </section>
           </>
         ) : null}
