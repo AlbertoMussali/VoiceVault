@@ -13,6 +13,8 @@ USE_BRANCH=""
 OPEN_PR=false
 SKIP_CONFIRM=false
 WORKSPACE=""
+RESUME_RUN_ID=""
+BASE_BRANCH=""
 
 show_help() {
   cat <<'EOT'
@@ -28,6 +30,7 @@ Options:
   --parallel
   --max-parallel N
   --branch NAME
+  --resume-run RUN_ID
   --pr
   -y, --yes
   -h, --help
@@ -48,6 +51,8 @@ while [[ $# -gt 0 ]]; do
       MAX_PARALLEL="$2"; PARALLEL_MODE=true; shift 2 ;;
     --branch)
       USE_BRANCH="$2"; shift 2 ;;
+    --resume-run)
+      RESUME_RUN_ID="$2"; PARALLEL_MODE=true; shift 2 ;;
     --pr)
       OPEN_PR=true; shift ;;
     -y|--yes)
@@ -80,6 +85,55 @@ echo "Model: $MODEL"
 echo "Sandbox: $SANDBOX"
 echo "Max iterations: $MAX_ITERATIONS"
 
+if git -C "$WORKSPACE" show-ref --verify --quiet refs/heads/main; then
+  BASE_BRANCH="main"
+elif git -C "$WORKSPACE" show-ref --verify --quiet refs/heads/master; then
+  BASE_BRANCH="master"
+else
+  BASE_BRANCH="$(git -C "$WORKSPACE" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
+fi
+
+acquire_lock() {
+  local workspace="$1"
+  local run_id="$2"
+  local mode="$3"
+  local lockdir="$workspace/.ralph/lockdir"
+  local meta="$lockdir/meta"
+
+  if mkdir "$lockdir" 2>/dev/null; then
+    {
+      echo "pid=$$"
+      echo "run_id=$run_id"
+      echo "mode=$mode"
+      echo "started_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    } >"$meta"
+    trap 'rm -rf "$lockdir" >/dev/null 2>&1 || true' EXIT INT TERM
+    return 0
+  fi
+
+  if [[ -f "$meta" ]]; then
+    local pid
+    pid=$(awk -F= '$1=="pid"{print $2}' "$meta")
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      echo "Ralphex is already running (pid=$pid). Lock: $meta" >&2
+      return 1
+    fi
+    rm -rf "$lockdir" >/dev/null 2>&1 || true
+    mkdir "$lockdir" 2>/dev/null || { echo "Failed to acquire lock: $lockdir" >&2; return 1; }
+    {
+      echo "pid=$$"
+      echo "run_id=$run_id"
+      echo "mode=$mode"
+      echo "started_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    } >"$meta"
+    trap 'rm -rf "$lockdir" >/dev/null 2>&1 || true' EXIT INT TERM
+    return 0
+  fi
+
+  echo "Failed to acquire lock: $lockdir" >&2
+  return 1
+}
+
 echo "Preflight: validating model access..."
 set +e
 preflight_out=$(
@@ -106,9 +160,69 @@ if [[ "$SKIP_CONFIRM" != true ]]; then
 fi
 
 if [[ "$PARALLEL_MODE" == true ]]; then
-  run_parallel_tasks "$WORKSPACE" "$MAX_PARALLEL" "$USE_BRANCH" "$MAX_ITERATIONS"
+  # Fail fast on dirty workspace so worktrees are created from a committed baseline.
+  if ! git -C "$WORKSPACE" rev-parse --git-dir >/dev/null 2>&1; then
+    echo "Parallel mode requires a git repository." >&2
+    exit 1
+  fi
+
+  if [[ -n "$RESUME_RUN_ID" ]]; then
+    acquire_lock "$WORKSPACE" "$RESUME_RUN_ID" "parallel-resume" || exit 3
+    resume_parallel_run "$WORKSPACE" "$RESUME_RUN_ID"
+    rc=$?
+    if [[ "$rc" -eq 0 ]]; then
+      # Best-effort finalize: fast-forward main to integration branch recorded in run meta.
+      meta="$WORKSPACE/.ralph/parallel/$RESUME_RUN_ID/run.meta"
+      integration_branch=$(awk -F= '$1=="integration_branch"{print $2}' "$meta" 2>/dev/null || true)
+      if [[ -n "$integration_branch" ]]; then
+        git -C "$WORKSPACE" checkout "$BASE_BRANCH" >/dev/null 2>&1 || true
+        git -C "$WORKSPACE" merge --ff-only "$integration_branch" || true
+      fi
+    fi
+    exit "$rc"
+  fi
+
+  if [[ -n "$(git -C "$WORKSPACE" status --porcelain)" ]]; then
+    # Allow untracked files, but refuse any modifications to tracked content.
+    true
+  fi
+
+  if ! git -C "$WORKSPACE" diff --quiet; then
+    echo "Workspace has modified tracked files; refusing to start parallel run." >&2
+    git -C "$WORKSPACE" diff --name-only >&2
+    exit 4
+  fi
+  if ! git -C "$WORKSPACE" diff --cached --quiet; then
+    echo "Workspace has staged changes; refusing to start parallel run." >&2
+    git -C "$WORKSPACE" diff --cached --name-only >&2
+    exit 4
+  fi
+  if [[ -n "$(git -C "$WORKSPACE" ls-files -u 2>/dev/null)" ]]; then
+    echo "Workspace has unresolved merge conflicts; refusing to start parallel run." >&2
+    exit 4
+  fi
+
+  run_id=$(date '+%Y%m%d%H%M%S')
+  integration_branch="${USE_BRANCH:-ralphex/integration-$run_id}"
+  acquire_lock "$WORKSPACE" "$run_id" "parallel" || exit 3
+
+  run_parallel_tasks "$WORKSPACE" "$MAX_PARALLEL" "$integration_branch" "$MAX_ITERATIONS" "$run_id" "$BASE_BRANCH"
   rc=$?
+  if [[ "$rc" -eq 0 ]]; then
+    # Ensure everything ends up on main via ff-only.
+    git -C "$WORKSPACE" checkout "$BASE_BRANCH" >/dev/null 2>&1 || true
+    if ! git -C "$WORKSPACE" merge --ff-only "$integration_branch"; then
+      echo "Failed to fast-forward main to $integration_branch." >&2
+      echo "Inspect with: git log $BASE_BRANCH..$integration_branch --oneline" >&2
+      exit 5
+    fi
+    cleanup_parallel_run "$WORKSPACE" "$run_id" "$integration_branch" || true
+  else
+    echo "Parallel run failed. Integration branch preserved: $integration_branch" >&2
+    echo "Resume later with: ./ralphex-loop.sh --parallel --resume-run $run_id -y" >&2
+  fi
 else
+  acquire_lock "$WORKSPACE" "serial-$$" "serial" || exit 3
   run_ralphex_loop "$WORKSPACE" "$SCRIPT_DIR"
   rc=$?
 fi
