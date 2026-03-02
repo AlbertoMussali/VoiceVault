@@ -136,8 +136,8 @@ export function EntryDetailPage() {
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
   const [isDeletingEntry, setIsDeletingEntry] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
-  const transcriptRef = useRef<HTMLElement | null>(null);
-  const highlightRef = useRef<HTMLElement | null>(null);
+  const transcriptRef = useRef<HTMLPreElement | null>(null);
+  const highlightRef = useRef<HTMLSpanElement | null>(null);
 
   useEffect(() => {
     if (!entryId) {

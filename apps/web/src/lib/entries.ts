@@ -141,6 +141,15 @@ function pickNumber(...values: unknown[]): number | null {
   return null;
 }
 
+function buildNetworkErrorMessage(): string {
+  const defaultMessage = 'Cannot reach the VoiceVault API. Start `make dev-local` and verify API is running.';
+  if (!API_BASE_URL) {
+    return defaultMessage;
+  }
+
+  return `${defaultMessage} Current API base URL: ${API_BASE_URL}`;
+}
+
 async function authorizedRequest(path: string, init: RequestInit, retry = true): Promise<Response> {
   const headers = new Headers(init.headers ?? {});
   const token = getAccessToken();
@@ -148,11 +157,21 @@ async function authorizedRequest(path: string, init: RequestInit, retry = true):
     headers.set('Authorization', `Bearer ${token}`);
   }
 
-  const response = await fetch(buildUrl(path), {
-    ...init,
-    headers,
-    credentials: 'include'
-  });
+  let response: Response;
+  try {
+    response = await fetch(buildUrl(path), {
+      ...init,
+      headers,
+      credentials: 'include'
+    });
+  } catch (error) {
+    // Browser fetch throws TypeError for network/CORS connectivity failures.
+    throw new EntryApiError(buildNetworkErrorMessage(), 0, {
+      errorCode: 'API_UNREACHABLE',
+      errorType: 'transient',
+      retryable: true
+    });
+  }
 
   if (response.status === 401 && retry) {
     const refreshed = await refreshSession();

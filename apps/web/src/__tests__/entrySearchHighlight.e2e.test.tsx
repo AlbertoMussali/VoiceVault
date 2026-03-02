@@ -123,8 +123,10 @@ describe('E2E: create entry -> search -> open highlight', () => {
     await screen.findByText(`Highlighted match for "${searchTerm}": ${startChar}-${endChar}`);
 
     await waitFor(() => {
-      const highlight = document.querySelector('mark');
-      expect(highlight).not.toBeNull();
+      const highlight = Array.from(document.querySelectorAll('span')).find(
+        (element) => element.textContent === searchTerm && element.className.includes('bg-amber-200')
+      );
+      expect(highlight).toBeDefined();
       expect(highlight?.textContent).toBe(searchTerm);
     });
   });

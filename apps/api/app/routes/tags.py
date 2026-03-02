@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -129,15 +129,16 @@ def update_tag(
     return serialize_tag(tag)
 
 
-@router.delete("/{tag_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{tag_id}", status_code=status.HTTP_204_NO_CONTENT, response_class=Response)
 def delete_tag(
     tag_id: uuid.UUID,
     request: Request,
     db: Session = Depends(get_db),
-) -> None:
+) -> Response:
     user_id = resolve_request_user_id(request, db)
     tag = db.get(Tag, tag_id)
     if tag is None or tag.user_id != user_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tag not found")
     db.delete(tag)
     db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

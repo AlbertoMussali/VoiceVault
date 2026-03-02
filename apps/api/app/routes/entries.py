@@ -4,7 +4,7 @@ from pathlib import Path
 import hashlib
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import SQLAlchemyError
@@ -62,12 +62,12 @@ def get_entry(entry_id: uuid.UUID) -> dict[str, str]:
     return {"entry_id": str(entry_id)}
 
 
-@router.delete("/{entry_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{entry_id}", status_code=status.HTTP_204_NO_CONTENT, response_class=Response)
 def delete_entry(
     entry_id: uuid.UUID,
     request: Request,
     db: Session = Depends(get_db),
-) -> None:
+) -> Response:
     user_id = resolve_request_user_id(request, db)
     entry = db.get(Entry, entry_id)
     if entry is None or entry.user_id != user_id:
@@ -128,6 +128,7 @@ def delete_entry(
             message="Entry deletion failed due to temporary database issues. Retry deletion.",
             error_type=ErrorType.TRANSIENT,
         ) from exc
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.patch("/{entry_id}/transcript")

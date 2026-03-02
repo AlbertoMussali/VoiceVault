@@ -23,10 +23,12 @@ from app.auth import (
 )
 from app.db import get_db
 from app.models import RefreshSession, User
+from app.routes.common import resolve_request_user_id
 from app.settings import Settings, get_settings
 
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
+profile_router = APIRouter(prefix="/api/v1", tags=["auth"])
 
 
 class CredentialsRequest(BaseModel):
@@ -42,6 +44,11 @@ class AuthTokensResponse(BaseModel):
     access_token: str
     refresh_token: str
     token_type: str = "bearer"
+
+
+class MeResponse(BaseModel):
+    id: str
+    email: str
 
 
 def _invalid_credentials() -> HTTPException:
@@ -201,14 +208,13 @@ def refresh(
     )
 
 
-@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT, response_class=Response)
 def logout(
     request: Request,
-    response: Response,
     payload: TokenRequest | None = None,
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
-) -> None:
+) -> Response:
     try:
         refresh_token, used_cookie = _resolve_refresh_token(payload, request, settings)
         if used_cookie and not _csrf_header_valid(request, settings):
@@ -225,4 +231,19 @@ def logout(
     if session.revoked_at is None:
         session.revoked_at = utcnow()
         db.commit()
+
+    response = Response(status_code=status.HTTP_204_NO_CONTENT)
     _clear_auth_cookies(response, settings)
+    return response
+
+
+@profile_router.get("/me", response_model=MeResponse)
+def get_me(
+    request: Request,
+    db: Session = Depends(get_db),
+) -> MeResponse:
+    user_id = resolve_request_user_id(request, db)
+    user = db.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
+    return MeResponse(id=str(user.id), email=user.email)

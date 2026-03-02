@@ -1,3 +1,4 @@
+import '@testing-library/jest-dom/vitest';
 import { cleanup } from '@testing-library/react';
 import { afterEach, vi } from 'vitest';
 
@@ -8,6 +9,8 @@ Object.defineProperty(window.HTMLElement.prototype, 'scrollIntoView', {
 
 afterEach(() => {
   cleanup();
-  localStorage.clear();
+  if (typeof localStorage?.clear === 'function') {
+    localStorage.clear();
+  }
   vi.unstubAllGlobals();
 });

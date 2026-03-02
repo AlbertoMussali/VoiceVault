@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -145,18 +145,19 @@ def update_brag_bullet(
     return _serialize_brag_bullet(bullet)
 
 
-@router.delete("/{bullet_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{bullet_id}", status_code=status.HTTP_204_NO_CONTENT, response_class=Response)
 def delete_brag_bullet(
     bullet_id: uuid.UUID,
     request: Request,
     db: Session = Depends(get_db),
-) -> None:
+) -> Response:
     user_id = resolve_request_user_id(request, db)
     bullet = db.get(BragBullet, bullet_id)
     if bullet is None or bullet.user_id != user_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Brag bullet not found")
     db.delete(bullet)
     db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post("/{bullet_id}/citations", status_code=status.HTTP_201_CREATED)

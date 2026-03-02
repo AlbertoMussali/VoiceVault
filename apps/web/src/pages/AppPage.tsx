@@ -66,6 +66,7 @@ const MAX_STATUS_POLLS = 40;
 const SEARCH_RESULT_LIMIT = 12;
 const INDEXING_STORAGE_KEY = 'voicevault.entry-indexing.v1';
 const TIMELINE_STORAGE_KEY = 'voicevault.timeline.v1';
+const ONBOARDING_DISMISSED_STORAGE_KEY = 'voicevault.onboarding.dismissed.v1';
 const ENTRY_TYPE_OPTIONS = ['win', 'blocker', 'idea', 'task', 'learning'];
 const ASK_TEMPLATES = [
   { label: 'Wins this week', query: 'What wins did I mention this week?' },
@@ -321,6 +322,27 @@ function writeStoredTimeline(timelineByEntry: Record<string, TimelineEntryRecord
   window.localStorage.setItem(TIMELINE_STORAGE_KEY, JSON.stringify(timelineByEntry));
 }
 
+function readOnboardingDismissed(): boolean {
+  if (typeof window === 'undefined') {
+    return false;
+  }
+
+  return window.localStorage.getItem(ONBOARDING_DISMISSED_STORAGE_KEY) === '1';
+}
+
+function writeOnboardingDismissed(isDismissed: boolean) {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  if (isDismissed) {
+    window.localStorage.setItem(ONBOARDING_DISMISSED_STORAGE_KEY, '1');
+    return;
+  }
+
+  window.localStorage.removeItem(ONBOARDING_DISMISSED_STORAGE_KEY);
+}
+
 function normalizeIsoDate(raw: string | null): string | null {
   if (!raw) {
     return null;
@@ -394,6 +416,9 @@ export function AppPage() {
   const chunksRef = useRef<BlobPart[]>([]);
   const timerRef = useRef<number | null>(null);
   const startedAtRef = useRef<number | null>(null);
+  const uploadSectionRef = useRef<HTMLElement | null>(null);
+  const askSectionRef = useRef<HTMLElement | null>(null);
+  const timelineSectionRef = useRef<HTMLElement | null>(null);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [pipelineState, setPipelineState] = useState<PipelineState>('idle');
   const [entryId, setEntryId] = useState<string | null>(null);
@@ -410,6 +435,7 @@ export function AppPage() {
   const [transcriptNotice, setTranscriptNotice] = useState<string | null>(null);
   const [indexingByEntry, setIndexingByEntry] = useState<Record<string, EntryIndexingData>>(() => readStoredIndexing());
   const [timelineByEntry, setTimelineByEntry] = useState<Record<string, TimelineEntryRecord>>(() => readStoredTimeline());
+  const [onboardingDismissed, setOnboardingDismissed] = useState<boolean>(() => readOnboardingDismissed());
   const [isTimelineLoading, setIsTimelineLoading] = useState(true);
   const [timelineError, setTimelineError] = useState<string | null>(null);
   const [timelineDateFrom, setTimelineDateFrom] = useState('');
@@ -552,6 +578,10 @@ export function AppPage() {
     setAskQuestionInput((previous) => (previous.trim().length > 0 ? previous : submittedSearchQuery));
   }, [submittedSearchQuery]);
 
+  useEffect(() => {
+    writeOnboardingDismissed(onboardingDismissed);
+  }, [onboardingDismissed]);
+
   function stopPolling() {
     if (pollTimerRef.current !== null) {
       window.clearInterval(pollTimerRef.current);
@@ -571,6 +601,16 @@ export function AppPage() {
       window.clearInterval(dataExportPollTimerRef.current);
       dataExportPollTimerRef.current = null;
     }
+  }
+
+  function scrollToSection(sectionRef: { current: HTMLElement | null }, focusSelector?: string) {
+    sectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    if (!focusSelector) {
+      return;
+    }
+
+    const target = sectionRef.current?.querySelector<HTMLElement>(focusSelector);
+    target?.focus();
   }
 
   function upsertTimelineEntry(entryId: string, patch: Partial<TimelineEntryRecord>) {
@@ -1395,6 +1435,42 @@ export function AppPage() {
 
     return true;
   });
+  const hasAnyTimelineEntries = timelineEntries.length > 0;
+  const latestTimelineEntryId = entryId ?? timelineEntries[0]?.entryId ?? null;
+  const hasReadyTimelineEntry = timelineEntries.some((entry) => READY_STATUSES.has(normalizeStatus(entry.status)));
+  const hasIndexedTimelineEntry = timelineEntries.some(
+    (entry) => Boolean(entry.type) || Boolean(entry.context) || entry.tags.length > 0
+  );
+  const hasKnowledgeAttempt =
+    submittedSearchQuery.trim().length > 0 || submittedAskQuery.trim().length > 0 || searchResults.length > 0 || askSources.length > 0;
+  const onboardingSteps = [
+    {
+      key: 'capture',
+      label: 'Capture your first note',
+      detail: 'Upload audio to create your first entry and transcript.',
+      done: hasAnyTimelineEntries
+    },
+    {
+      key: 'process',
+      label: 'Confirm processing',
+      detail: 'Wait for at least one entry to reach ready status.',
+      done: hasReadyTimelineEntry
+    },
+    {
+      key: 'index',
+      label: 'Add quick indexing',
+      detail: 'Set type, context, and tags so retrieval has structure.',
+      done: hasIndexedTimelineEntry
+    },
+    {
+      key: 'ask',
+      label: 'Run your first query',
+      detail: 'Use Ask or Search to verify retrieval and highlights.',
+      done: hasKnowledgeAttempt
+    }
+  ] as const;
+  const onboardingCompletedCount = onboardingSteps.filter((step) => step.done).length;
+  const shouldShowOnboardingCard = !onboardingDismissed && onboardingCompletedCount < onboardingSteps.length;
   const bragDraftsInRange = bragDrafts.filter((draft) => {
     const date = new Date(draft.createdAt);
     if (Number.isNaN(date.getTime())) {
@@ -1550,9 +1626,16 @@ export function AppPage() {
             <h1 className="text-2xl font-semibold tracking-tight">VoiceVault App</h1>
             <p className="mt-2 text-sm text-muted-foreground">Authenticated session is active.</p>
           </div>
-          <Button variant="outline" size="sm" onClick={() => navigate('/app/audit')}>
-            Open audit log
-          </Button>
+          <div className="flex items-center gap-2">
+            {!shouldShowOnboardingCard && onboardingCompletedCount < onboardingSteps.length ? (
+              <Button variant="outline" size="sm" onClick={() => setOnboardingDismissed(false)}>
+                Show setup guide
+              </Button>
+            ) : null}
+            <Button variant="outline" size="sm" onClick={() => navigate('/app/audit')}>
+              Open audit log
+            </Button>
+          </div>
         </div>
         <dl className="mt-6 rounded-md border bg-background p-4 text-sm">
           <div className="flex justify-between gap-3">
@@ -1560,6 +1643,71 @@ export function AppPage() {
             <dd className="font-medium">{typeof user?.email === 'string' ? user.email : 'Unknown'}</dd>
           </div>
         </dl>
+        {shouldShowOnboardingCard ? (
+          <section className="mt-6 rounded-md border border-emerald-200 bg-gradient-to-r from-emerald-50 via-cyan-50 to-sky-50 p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <h2 className="text-base font-semibold">Guided setup</h2>
+                <p className="mt-1 text-sm text-slate-700">
+                  {onboardingCompletedCount} of {onboardingSteps.length} steps complete.
+                </p>
+              </div>
+              <Button variant="outline" size="sm" onClick={() => setOnboardingDismissed(true)}>
+                Hide
+              </Button>
+            </div>
+            <div className="mt-4 grid gap-2">
+              {onboardingSteps.map((step, index) => (
+                <div
+                  key={step.key}
+                  className={`rounded-md border px-3 py-2 text-sm ${step.done ? 'border-emerald-200 bg-emerald-100/60' : 'border-slate-200 bg-white/80'}`}
+                >
+                  <p className="font-medium">
+                    {index + 1}. {step.label} {step.done ? 'Complete' : 'Pending'}
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">{step.detail}</p>
+                </div>
+              ))}
+            </div>
+            <div className="mt-4 flex flex-wrap gap-2">
+              <Button
+                size="sm"
+                onClick={() => scrollToSection(uploadSectionRef, 'input[type=\"file\"]')}
+                disabled={hasAnyTimelineEntries}
+              >
+                Upload first note
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  if (latestTimelineEntryId) {
+                    setEntryId(latestTimelineEntryId);
+                    const nextStatus = timelineByEntry[latestTimelineEntryId]?.status ?? null;
+                    setEntryStatus(nextStatus);
+                    openIndexingModal(latestTimelineEntryId);
+                    return;
+                  }
+                  scrollToSection(uploadSectionRef, 'input[type=\"file\"]');
+                }}
+                disabled={hasIndexedTimelineEntry}
+              >
+                Add indexing
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => scrollToSection(askSectionRef, 'input[type=\"search\"]')}
+                disabled={hasKnowledgeAttempt}
+              >
+                Ask or search
+              </Button>
+              <Button size="sm" variant="outline" onClick={() => scrollToSection(timelineSectionRef)}>
+                Review timeline
+              </Button>
+            </div>
+          </section>
+        ) : null}
         <section className="mt-6 rounded-md border bg-background p-4">
           <h2 className="text-base font-semibold">Record audio</h2>
           <p className="mt-1 text-sm text-muted-foreground">Capture a voice note as a WebM audio blob.</p>
@@ -1596,7 +1744,7 @@ export function AppPage() {
             </div>
           ) : null}
         </section>
-        <div className="mt-6 space-y-4 rounded-md border bg-background p-4">
+        <section ref={uploadSectionRef} className="mt-6 space-y-4 rounded-md border bg-background p-4">
           <h2 className="text-base font-semibold">Audio Upload Pipeline</h2>
           <p className="text-sm text-muted-foreground">Create entry, upload audio, then poll for transcription status.</p>
           <input
@@ -1606,7 +1754,7 @@ export function AppPage() {
             className="block w-full text-sm file:mr-3 file:rounded-md file:border file:border-input file:bg-background file:px-3 file:py-2 file:text-sm"
           />
           <div className="flex items-center gap-3">
-            <Button onClick={handleStartUpload} disabled={!selectedFile || isBusy}>
+            <Button onClick={() => void handleStartUpload()} disabled={!selectedFile || isBusy}>
               {pipelineState === 'creating' && 'Creating entry...'}
               {pipelineState === 'uploading' && 'Uploading audio...'}
               {pipelineState === 'transcribing' && 'Polling status...'}
@@ -1638,8 +1786,8 @@ export function AppPage() {
             </p>
           ) : null}
           {errorMessage ? <p className="text-sm text-destructive">{errorMessage}</p> : null}
-        </div>
-        <div className="mt-6 space-y-4 rounded-md border bg-background p-4">
+        </section>
+        <section ref={askSectionRef} className="mt-6 space-y-4 rounded-md border bg-background p-4">
           <div className="flex flex-wrap items-center gap-2">
             <h2 className="text-base font-semibold">Transcript</h2>
             {transcriptVersion !== null ? (
@@ -1684,8 +1832,8 @@ export function AppPage() {
 
           {transcriptNotice ? <p className="text-sm text-emerald-700">{transcriptNotice}</p> : null}
           {transcriptError ? <p className="text-sm text-destructive">{transcriptError}</p> : null}
-        </div>
-        <div className="mt-6 space-y-4 rounded-md border bg-background p-4">
+        </section>
+        <section ref={timelineSectionRef} className="mt-6 space-y-4 rounded-md border bg-background p-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <h2 className="text-base font-semibold">Quick Indexing</h2>
             <Button
@@ -1719,7 +1867,7 @@ export function AppPage() {
           ) : (
             <p className="text-sm text-muted-foreground">No indexing saved for this entry yet.</p>
           )}
-        </div>
+        </section>
         <div className="mt-6 space-y-4 rounded-md border bg-background p-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <h2 className="text-base font-semibold">Ask</h2>
@@ -2329,8 +2477,20 @@ export function AppPage() {
                 </article>
               ))}
             </div>
-          ) : (
+          ) : hasAnyTimelineEntries ? (
             <p className="text-sm text-muted-foreground">No entries match the selected filters yet.</p>
+          ) : (
+            <div className="rounded-md border border-dashed p-4">
+              <p className="text-sm font-medium">No entries yet.</p>
+              <p className="mt-1 text-sm text-muted-foreground">
+                Upload your first note to start transcription, quick indexing, and source-backed retrieval.
+              </p>
+              <div className="mt-3">
+                <Button size="sm" onClick={() => scrollToSection(uploadSectionRef, 'input[type=\"file\"]')}>
+                  Upload first note
+                </Button>
+              </div>
+            </div>
           )}
         </div>
         <div className="mt-6">

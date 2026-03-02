@@ -15,7 +15,7 @@ from app.auth import authorize_entries_request
 from app.db import initialize_schema
 from app.errors import ApiContractError
 from app.observability import configure_logging, report_backend_exception, request_context_fields
-from app.routers.auth import router as auth_router
+from app.routers.auth import profile_router, router as auth_router
 from app.routes.account import router as account_router
 from app.routes.audit import router as audit_router
 from app.routes.ask import router as ask_router
@@ -65,6 +65,10 @@ def create_app(audit_session_factory: sessionmaker[Session] | None = None) -> Fa
 
     @app.middleware("http")
     async def entry_authorization_middleware(request: Request, call_next) -> Response:
+        # Let CORS preflight requests flow through without auth checks.
+        if request.method == "OPTIONS":
+            return await call_next(request)
+
         if request.url.path.startswith("/api/v1/entries"):
             unauthorized = authorize_entries_request(request, settings)
             if unauthorized is not None:
@@ -113,6 +117,7 @@ def create_app(audit_session_factory: sessionmaker[Session] | None = None) -> Fa
         return {"version": settings.api_version}
 
     app.include_router(auth_router)
+    app.include_router(profile_router)
     app.include_router(account_router)
     app.include_router(audit_router)
     app.include_router(entries_router)

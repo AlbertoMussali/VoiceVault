@@ -1,7 +1,7 @@
 """create export jobs table
 
-Revision ID: 20260302_0007
-Revises: 20260302_0006
+Revision ID: 20260302_0010
+Revises: 20260302_0009
 Create Date: 2026-03-02 00:00:00.000000
 """
 
@@ -12,8 +12,8 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
-revision = "20260302_0007"
-down_revision = "20260302_0006"
+revision = "20260302_0010"
+down_revision = "20260302_0009"
 branch_labels = None
 depends_on = None
 

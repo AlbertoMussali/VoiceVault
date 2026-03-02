@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select, update
 from sqlalchemy.exc import SQLAlchemyError
@@ -21,12 +21,12 @@ class AccountDeleteRequest(BaseModel):
     password: str = Field(min_length=8, max_length=128)
 
 
-@router.delete("", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("", status_code=status.HTTP_204_NO_CONTENT, response_class=Response)
 def delete_account(
     payload: AccountDeleteRequest,
     request: Request,
     db: Session = Depends(get_db),
-) -> None:
+) -> Response:
     user_id = resolve_request_user_id(request, db)
     user = db.get(User, user_id)
     if user is None:
@@ -104,3 +104,4 @@ def delete_account(
             message="Account deletion failed due to temporary database issues. Retry deletion.",
             error_type=ErrorType.TRANSIENT,
         ) from exc
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

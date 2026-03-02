@@ -34,7 +34,7 @@ class AuthServiceTests(unittest.TestCase):
         cls.TestSessionLocal = sessionmaker(bind=cls.engine, autoflush=False, autocommit=False, expire_on_commit=False)
         Base.metadata.create_all(bind=cls.engine)
 
-        cls.app = create_app()
+        cls.app = create_app(audit_session_factory=cls.TestSessionLocal)
 
         def override_get_db() -> Session:
             db = cls.TestSessionLocal()
@@ -177,6 +177,19 @@ class AuthServiceTests(unittest.TestCase):
 
         with_csrf = self.client.post("/api/v1/auth/logout", headers={"X-CSRF-Token": csrf_token})
         self.assertEqual(with_csrf.status_code, 204)
+
+    def test_me_returns_authenticated_user(self) -> None:
+        signup_response = self.client.post(
+            "/api/v1/auth/signup",
+            json={"email": "profile@example.com", "password": "StrongPass123"},
+        )
+        access_token = signup_response.json()["access_token"]
+
+        response = self.client.get("/api/v1/me", headers={"Authorization": f"Bearer {access_token}"})
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn("id", payload)
+        self.assertEqual(payload["email"], "profile@example.com")
 
 
 if __name__ == "__main__":
