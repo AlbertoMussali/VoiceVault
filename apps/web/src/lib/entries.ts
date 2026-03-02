@@ -2,10 +2,30 @@ import { ApiError, getAccessToken, refreshSession } from '@/lib/auth';
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? '';
 
+type ErrorContract = {
+  errorCode?: string;
+  errorType?: string;
+  retryable?: boolean;
+};
+
 export type EntryStatusResponse = {
   entryId: string;
   status: string | null;
 };
+
+export class EntryApiError extends ApiError {
+  readonly errorCode?: string;
+  readonly errorType?: string;
+  readonly retryable: boolean;
+
+  constructor(message: string, status: number, contract?: ErrorContract) {
+    super(message, status);
+    this.name = 'EntryApiError';
+    this.errorCode = contract?.errorCode;
+    this.errorType = contract?.errorType;
+    this.retryable = contract?.retryable === true;
+  }
+}
 
 function buildUrl(path: string): string {
   if (!API_BASE_URL) {
@@ -33,6 +53,19 @@ function parseErrorMessage(payload: unknown, fallback: string): string {
   }
 
   return fallback;
+}
+
+function parseErrorContract(payload: unknown): ErrorContract {
+  if (!payload || typeof payload !== 'object') {
+    return {};
+  }
+
+  const record = payload as Record<string, unknown>;
+  return {
+    errorCode: typeof record.error_code === 'string' ? record.error_code : undefined,
+    errorType: typeof record.error_type === 'string' ? record.error_type : undefined,
+    retryable: typeof record.retryable === 'boolean' ? record.retryable : undefined
+  };
 }
 
 async function parseResponsePayload(response: Response): Promise<unknown> {
@@ -66,7 +99,7 @@ async function authorizedFetch(path: string, init: RequestInit, retry = true): P
 
   const payload = await parseResponsePayload(response);
   if (!response.ok) {
-    throw new ApiError(parseErrorMessage(payload, 'Request failed.'), response.status);
+    throw new EntryApiError(parseErrorMessage(payload, 'Request failed.'), response.status, parseErrorContract(payload));
   }
 
   return payload;

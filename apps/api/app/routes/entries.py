@@ -14,7 +14,7 @@ from app.auth import decode_token
 from app.db import get_db
 from app.jobs import enqueue_registered_job
 from app.errors import ApiContractError, ErrorType
-from app.models import AudioAsset, Entry, User
+from app.models import AuditLog, AudioAsset, Entry, User
 from app.settings import get_settings
 from app.storage import get_storage_backend
 
@@ -189,6 +189,17 @@ async def upload_entry_audio(
     )
     db.add(audio_asset)
     entry.status = "transcribing"
+    db.add(
+        AuditLog(
+            user_id=entry.user_id,
+            entry_id=entry_id,
+            event_type="audio_uploaded",
+            metadata_json={
+                "bytes": len(body),
+                "mime_type": mime_type,
+            },
+        )
+    )
 
     try:
         db.flush()

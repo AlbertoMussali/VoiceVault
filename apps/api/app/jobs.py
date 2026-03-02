@@ -12,9 +12,9 @@ from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.db import get_sessionmaker
-from app.models import AudioAsset, Entry, Transcript
+from app.models import AuditLog, AudioAsset, Entry, Transcript
 from app.openai_stt import transcribe_audio_bytes
-from app.settings import get_redis_url
+from app.settings import get_redis_url, get_settings
 from app.storage import get_storage_backend
 
 DEFAULT_QUEUE_NAME = "default"
@@ -42,6 +42,16 @@ def run_transcription_job(entry_id: str, audio_asset_id: str | None = None) -> d
 
         storage = get_storage_backend()
         audio_bytes = storage.get(audio_asset.storage_key)
+        settings = get_settings()
+        _write_audit_event(
+            entry_id=entry_uuid,
+            user_id=entry.user_id,
+            event_type="transcription_called",
+            metadata_json={
+                "model": settings.openai_stt_model,
+                "bytes": len(audio_bytes),
+            },
+        )
         transcription = transcribe_audio_bytes(
             audio_bytes=audio_bytes,
             mime_type=audio_asset.mime_type,
@@ -135,3 +145,22 @@ def _next_transcript_version(session: Session, entry_uuid: uuid.UUID) -> int:
     if max_version is None:
         return 1
     return int(max_version) + 1
+
+
+def _write_audit_event(
+    *,
+    entry_id: uuid.UUID,
+    user_id: uuid.UUID,
+    event_type: str,
+    metadata_json: dict[str, Any],
+) -> None:
+    with get_sessionmaker()() as audit_session:
+        audit_session.add(
+            AuditLog(
+                user_id=user_id,
+                entry_id=entry_id,
+                event_type=event_type,
+                metadata_json=metadata_json,
+            )
+        )
+        audit_session.commit()

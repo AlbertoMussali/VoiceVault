@@ -3,12 +3,15 @@ import { useNavigate } from 'react-router-dom';
 
 import { useAuth } from '@/auth/AuthProvider';
 import { Button } from '@/components/ui/Button';
-import { createEntry, fetchEntryStatus, uploadEntryAudio } from '@/lib/entries';
+import { EntryApiError, createEntry, fetchEntryStatus, uploadEntryAudio } from '@/lib/entries';
 
 type PipelineState = 'idle' | 'creating' | 'uploading' | 'transcribing' | 'ready' | 'error';
+type RetryAction = 'restart_pipeline' | 'retry_upload' | 'resume_polling' | null;
+type PipelineStep = 'creating' | 'uploading' | 'polling';
 
 const READY_STATUSES = new Set(['ready', 'completed', 'done']);
 const ERROR_STATUSES = new Set(['error', 'failed', 'fatal']);
+const MAX_STATUS_POLLS = 40;
 
 function normalizeStatus(status: string | null): string {
   return (status ?? '').trim().toLowerCase();
@@ -50,6 +53,7 @@ export function AppPage() {
   const [entryId, setEntryId] = useState<string | null>(null);
   const [entryStatus, setEntryStatus] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [retryAction, setRetryAction] = useState<RetryAction>(null);
   const pollTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -193,43 +197,98 @@ export function AppPage() {
     const file = event.target.files?.[0] ?? null;
     setSelectedFile(file);
     setErrorMessage(null);
+    setRetryAction(null);
   }
 
   async function pollUntilComplete(nextEntryId: string) {
-    const poll = async () => {
+    let pollAttempts = 0;
+
+    const poll = async (): Promise<boolean> => {
       try {
+        pollAttempts += 1;
         const result = await fetchEntryStatus(nextEntryId);
         const normalized = normalizeStatus(result.status);
-        setEntryStatus(result.status);
+        setEntryStatus(result.status ?? 'processing');
 
         if (READY_STATUSES.has(normalized)) {
           setPipelineState('ready');
+          setRetryAction(null);
           stopPolling();
-          return;
+          return false;
         }
 
         if (ERROR_STATUSES.has(normalized)) {
           setPipelineState('error');
           setErrorMessage('Transcription failed on the server.');
+          setRetryAction(null);
           stopPolling();
-          return;
+          return false;
+        }
+
+        if (!normalized && pollAttempts >= MAX_STATUS_POLLS) {
+          setPipelineState('error');
+          setErrorMessage('Processing is still pending. Retry status polling.');
+          setRetryAction('resume_polling');
+          stopPolling();
+          return false;
         }
 
         setPipelineState('transcribing');
+        return true;
       } catch (error) {
         setPipelineState('error');
+        setRetryAction('resume_polling');
         stopPolling();
         setErrorMessage(error instanceof Error ? error.message : 'Failed to poll entry status.');
+        return false;
       }
     };
 
-    await poll();
+    const shouldContinuePolling = await poll();
+    if (!shouldContinuePolling) {
+      return;
+    }
+
     pollTimerRef.current = window.setInterval(() => {
       void poll();
     }, 3000);
   }
 
-  async function handleStartUpload() {
+  function handlePipelineError(error: unknown, step: PipelineStep, currentEntryId: string | null) {
+    setPipelineState('error');
+
+    if (error instanceof EntryApiError) {
+      const withCode = error.errorCode ? `${error.message} (${error.errorCode})` : error.message;
+      setErrorMessage(withCode);
+
+      if (step === 'polling' && currentEntryId) {
+        setRetryAction('resume_polling');
+        return;
+      }
+
+      if (step === 'uploading' && error.retryable && currentEntryId) {
+        setRetryAction('retry_upload');
+        return;
+      }
+
+      if (error.retryable) {
+        setRetryAction('restart_pipeline');
+        return;
+      }
+
+      setRetryAction(null);
+      return;
+    }
+
+    setErrorMessage(error instanceof Error ? error.message : 'Upload pipeline failed.');
+    if (step === 'polling' && currentEntryId) {
+      setRetryAction('resume_polling');
+      return;
+    }
+    setRetryAction(null);
+  }
+
+  async function handleStartUpload(options?: { reuseCurrentEntry?: boolean }) {
     if (!selectedFile) {
       setErrorMessage('Pick an audio file first.');
       return;
@@ -237,27 +296,72 @@ export function AppPage() {
 
     stopPolling();
     setErrorMessage(null);
-    setEntryId(null);
-    setEntryStatus(null);
+    setRetryAction(null);
+
+    let currentEntryId = options?.reuseCurrentEntry ? entryId : null;
+    let step: PipelineStep = 'creating';
 
     try {
-      setPipelineState('creating');
-      const created = await createEntry();
-      setEntryId(created.entryId);
-      setEntryStatus(created.status);
+      if (!currentEntryId) {
+        setEntryId(null);
+        setEntryStatus(null);
+        setPipelineState('creating');
 
+        const created = await createEntry();
+        currentEntryId = created.entryId;
+        setEntryId(created.entryId);
+        setEntryStatus(created.status);
+      }
+      if (!currentEntryId) {
+        throw new Error('Entry creation did not return an id.');
+      }
+
+      step = 'uploading';
       setPipelineState('uploading');
-      await uploadEntryAudio(created.entryId, selectedFile);
+      await uploadEntryAudio(currentEntryId, selectedFile);
 
+      step = 'polling';
       setPipelineState('transcribing');
-      await pollUntilComplete(created.entryId);
+      await pollUntilComplete(currentEntryId);
     } catch (error) {
-      setPipelineState('error');
-      setErrorMessage(error instanceof Error ? error.message : 'Upload pipeline failed.');
+      handlePipelineError(error, step, currentEntryId);
+    }
+  }
+
+  async function handleRetry() {
+    if (!retryAction || isBusy) {
+      return;
+    }
+
+    if (retryAction === 'restart_pipeline') {
+      await handleStartUpload();
+      return;
+    }
+
+    if (retryAction === 'retry_upload' && entryId) {
+      await handleStartUpload({ reuseCurrentEntry: true });
+      return;
+    }
+
+    if (retryAction === 'resume_polling' && entryId) {
+      stopPolling();
+      setErrorMessage(null);
+      setRetryAction(null);
+      setPipelineState('transcribing');
+      await pollUntilComplete(entryId);
     }
   }
 
   const isBusy = pipelineState === 'creating' || pipelineState === 'uploading' || pipelineState === 'transcribing';
+  const retryLabel =
+    retryAction === 'retry_upload'
+      ? 'Retry upload'
+      : retryAction === 'resume_polling'
+        ? 'Retry status check'
+        : retryAction === 'restart_pipeline'
+          ? 'Restart pipeline'
+          : null;
+
   return (
     <main className="min-h-screen bg-gradient-to-br from-sky-50 via-cyan-50 to-emerald-100 p-6">
       <section className="mx-auto mt-12 w-full max-w-2xl rounded-lg border bg-card p-8 text-card-foreground shadow-sm">
@@ -322,6 +426,11 @@ export function AppPage() {
               {(pipelineState === 'idle' || pipelineState === 'ready' || pipelineState === 'error') &&
                 'Start upload pipeline'}
             </Button>
+            {retryLabel ? (
+              <Button onClick={handleRetry} disabled={isBusy} variant="outline">
+                {retryLabel}
+              </Button>
+            ) : null}
             <span className="text-sm text-muted-foreground">
               State: <span className="font-medium text-foreground">{pipelineState}</span>
             </span>

@@ -14,7 +14,7 @@ if str(ROOT) not in sys.path:
 
 from app.db import get_sessionmaker, initialize_schema, reset_engine_cache
 from app.jobs import JOB_REGISTRY, run_transcription_job
-from app.models import AudioAsset, Entry, Transcript, User
+from app.models import AuditLog, AudioAsset, Entry, Transcript, User
 from app.openai_stt import TranscriptionResult
 from app.settings import get_settings
 from app.storage import get_storage_backend
@@ -90,6 +90,20 @@ class TranscriptionJobTests(unittest.TestCase):
             self.assertEqual(transcript.transcript_text, "hello from stt")
             self.assertEqual(transcript.language_code, "en")
             self.assertEqual(transcript.source, "stt")
+
+            audit_row = (
+                session.query(AuditLog)
+                .filter(AuditLog.event_type == "transcription_called")
+                .order_by(AuditLog.id.desc())
+                .first()
+            )
+            self.assertIsNotNone(audit_row)
+            assert audit_row is not None
+            self.assertEqual(audit_row.entry_id, entry_id)
+            self.assertEqual(audit_row.user_id, entry.user_id)
+            self.assertEqual(audit_row.metadata_json["model"], get_settings().openai_stt_model)
+            self.assertEqual(audit_row.metadata_json["bytes"], len(b"\x1aE\xdf\xa3test-webm"))
+            self.assertNotIn("text", audit_row.metadata_json)
         finally:
             session.close()
 

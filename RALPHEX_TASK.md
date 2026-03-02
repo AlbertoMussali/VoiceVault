@@ -138,11 +138,11 @@ Notes:
   - Done when: transcript saved; entry status flips to ready.
 - [x] [BE] Define and enforce error contract (transient vs fatal; error_code/message). <!-- group: 300 -->
   - Done when: failures are visible in UI and safe retries are possible.
-- [ ] [FE] Implement processing screen with retry path where safe. <!-- group: 300 -->
+- [x] [FE] Implement processing screen with retry path where safe. <!-- group: 300 -->
   - Done when: user can recover from common failures without data loss.
-- [ ] [BE] Add audit events: `audio_uploaded`, `transcription_called` (no content; include model/bytes). <!-- group: 300 -->
+- [x] [BE] Add audit events: `audio_uploaded`, `transcription_called` (no content; include model/bytes). <!-- group: 300 -->
   - Done when: audit log shows processing timeline.
-- [ ] [QA] Add integration test path: upload small file + stub OpenAI in test mode. <!-- group: 300 -->
+- [x] [QA] Add integration test path: upload small file + stub OpenAI in test mode. <!-- group: 300 -->
   - Done when: test suite validates pipeline deterministically.
 
 ## Phase 3 — Entry detail, transcript versioning, and “5-second indexing”

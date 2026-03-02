@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 
 from app.db import get_sessionmaker, reset_engine_cache
 from app.main import create_app
-from app.models import AudioAsset, Entry, User
+from app.models import AuditLog, AudioAsset, Entry, User
 from app.settings import get_settings
 
 
@@ -125,6 +125,19 @@ class EntryAudioUploadTests(unittest.TestCase):
             self.assertIsNotNone(entry)
             assert entry is not None
             self.assertEqual(entry.status, "transcribing")
+            audit_row = (
+                session.query(AuditLog)
+                .filter(AuditLog.event_type == "audio_uploaded")
+                .order_by(AuditLog.id.desc())
+                .first()
+            )
+            self.assertIsNotNone(audit_row)
+            assert audit_row is not None
+            self.assertEqual(audit_row.entry_id, entry_id)
+            self.assertEqual(audit_row.user_id, entry.user_id)
+            self.assertEqual(audit_row.metadata_json["bytes"], len(payload))
+            self.assertEqual(audit_row.metadata_json["mime_type"], "audio/webm")
+            self.assertNotIn("text", audit_row.metadata_json)
         finally:
             session.close()
 
