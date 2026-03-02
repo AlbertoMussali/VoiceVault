@@ -130,7 +130,7 @@ Notes:
   - Done when: user can record/stop and obtain a playable blob.
 - [x] [BE] Implement `POST /entries` to create an entry shell. <!-- group: 300 -->
   - Done when: returns `entry_id`; entry stored with correct initial status.
-- [ ] [FE] Implement upload pipeline: create entry → upload audio → poll status. <!-- group: 300 -->
+- [x] [FE] Implement upload pipeline: create entry → upload audio → poll status. <!-- group: 300 -->
   - Done when: UI shows uploading/transcribing/ready/error states.
 - [ ] [BE] Implement multipart audio upload fully: store blob, set status=transcribing, enqueue job. <!-- group: 300 -->
   - Done when: upload triggers job and persists audio asset record.
