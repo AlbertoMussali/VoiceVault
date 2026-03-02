@@ -17,8 +17,14 @@ def run_stub_job(payload: str = "ok") -> dict[str, str]:
     return {"status": "ok", "payload": payload}
 
 
+def run_transcription_job(entry_id: str, audio_asset_id: str) -> dict[str, str]:
+    """Placeholder transcription job until STT integration is implemented."""
+    return {"status": "queued", "entry_id": entry_id, "audio_asset_id": audio_asset_id}
+
+
 JOB_REGISTRY: dict[str, Callable[..., Any]] = {
     "stub.echo": run_stub_job,
+    "transcription.process_entry_audio": run_transcription_job,
 }
 
 

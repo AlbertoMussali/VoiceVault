@@ -7,9 +7,11 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from jwt import InvalidTokenError
 from sqlalchemy.orm import Session
+from starlette.datastructures import UploadFile
 
 from app.auth import decode_token
 from app.db import get_db
+from app.jobs import enqueue_registered_job
 from app.models import AudioAsset, Entry, User
 from app.settings import get_settings
 from app.storage import get_storage_backend
@@ -109,19 +111,39 @@ async def upload_entry_audio(
     if entry is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
 
-    content_type = request.headers.get("content-type", "")
-    if not content_type.startswith("audio/"):
+    request_content_type = request.headers.get("content-type", "")
+    requested_name = request.headers.get("x-audio-filename", f"entry-{entry_id}.webm")
+    filename = Path(requested_name).name or f"entry-{entry_id}.webm"
+
+    mime_type = request_content_type
+    body = b""
+
+    if request_content_type.startswith("multipart/form-data"):
+        form = await request.form()
+        upload = form.get("audio") or form.get("file")
+        if not isinstance(upload, UploadFile):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing multipart audio file")
+        body = await upload.read()
+        if upload.filename:
+            filename = Path(upload.filename).name or filename
+        mime_type = upload.content_type or ""
+    else:
+        if not request_content_type.startswith("audio/"):
+            raise HTTPException(
+                status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+                detail="Content-Type must be audio/* or multipart/form-data",
+            )
+        body = await request.body()
+
+    if not mime_type.startswith("audio/"):
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            detail="Content-Type must be audio/*",
+            detail="Audio file content type must be audio/*",
         )
 
-    body = await request.body()
     if not body:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Audio payload is empty")
 
-    requested_name = request.headers.get("x-audio-filename", f"entry-{entry_id}.webm")
-    filename = Path(requested_name).name or f"entry-{entry_id}.webm"
     unique = uuid.uuid4()
     storage_key = f"entries/{entry_id}/audio/{unique}-{filename}"
 
@@ -132,17 +154,35 @@ async def upload_entry_audio(
     audio_asset = AudioAsset(
         entry_id=entry_id,
         storage_key=storage_key,
-        mime_type=content_type,
+        mime_type=mime_type,
         size_bytes=len(body),
         sha256_hex=sha256_hex,
     )
     db.add(audio_asset)
-    db.commit()
-    db.refresh(audio_asset)
+    entry.status = "transcribing"
+
+    try:
+        db.flush()
+        job = enqueue_registered_job(
+            "transcription.process_entry_audio",
+            entry_id=str(entry_id),
+            audio_asset_id=str(audio_asset.id),
+        )
+        db.commit()
+        db.refresh(audio_asset)
+    except Exception as exc:
+        db.rollback()
+        storage.delete(storage_key)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Audio accepted but failed to enqueue transcription job",
+        ) from exc
 
     return {
         "asset_id": str(audio_asset.id),
         "entry_id": str(entry_id),
+        "status": entry.status,
+        "job_id": str(job.id),
         "storage_key": storage_key,
         "size_bytes": audio_asset.size_bytes,
         "mime_type": audio_asset.mime_type,

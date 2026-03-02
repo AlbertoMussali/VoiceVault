@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 import uuid
+from unittest.mock import patch
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -82,15 +83,24 @@ class EntryAudioUploadTests(unittest.TestCase):
             "Authorization": "Bearer entry-secret-test",
         }
 
-        response = self.client.post(f"/api/v1/entries/{entry_id}/audio", data=payload, headers=headers)
+        with patch("app.routes.entries.enqueue_registered_job") as enqueue_mock:
+            enqueue_mock.return_value = type("JobStub", (), {"id": "job-raw-123"})()
+            response = self.client.post(f"/api/v1/entries/{entry_id}/audio", data=payload, headers=headers)
 
         self.assertEqual(response.status_code, 201)
         body = response.json()
         self.assertEqual(body["entry_id"], str(entry_id))
+        self.assertEqual(body["status"], "transcribing")
+        self.assertEqual(body["job_id"], "job-raw-123")
         self.assertEqual(body["size_bytes"], len(payload))
         self.assertEqual(body["mime_type"], "audio/webm")
         self.assertIn("storage_key", body)
         self.assertIn("asset_id", body)
+        enqueue_mock.assert_called_once_with(
+            "transcription.process_entry_audio",
+            entry_id=str(entry_id),
+            audio_asset_id=body["asset_id"],
+        )
 
         stored_blob = pathlib.Path(self.temp_dir.name) / "storage" / body["storage_key"]
         self.assertTrue(stored_blob.exists())
@@ -106,26 +116,57 @@ class EntryAudioUploadTests(unittest.TestCase):
             self.assertEqual(audio_asset.storage_key, body["storage_key"])
             self.assertEqual(audio_asset.size_bytes, len(payload))
             self.assertEqual(audio_asset.mime_type, "audio/webm")
+            entry = session.get(Entry, entry_id)
+            self.assertIsNotNone(entry)
+            assert entry is not None
+            self.assertEqual(entry.status, "transcribing")
         finally:
             session.close()
 
+    def test_upload_audio_accepts_multipart_file(self) -> None:
+        entry_id = self._create_user_and_entry()
+        payload = b"\x1aE\xdf\xa3multipart-webm-bytes"
+        files = {"audio": ("meeting.webm", payload, "audio/webm")}
+        headers = {"Authorization": "Bearer entry-secret-test"}
+
+        with patch("app.routes.entries.enqueue_registered_job") as enqueue_mock:
+            enqueue_mock.return_value = type("JobStub", (), {"id": "job-multipart-456"})()
+            response = self.client.post(f"/api/v1/entries/{entry_id}/audio", files=files, headers=headers)
+
+        self.assertEqual(response.status_code, 201)
+        body = response.json()
+        self.assertEqual(body["entry_id"], str(entry_id))
+        self.assertEqual(body["status"], "transcribing")
+        self.assertEqual(body["job_id"], "job-multipart-456")
+        self.assertEqual(body["size_bytes"], len(payload))
+        self.assertEqual(body["mime_type"], "audio/webm")
+        enqueue_mock.assert_called_once_with(
+            "transcription.process_entry_audio",
+            entry_id=str(entry_id),
+            audio_asset_id=body["asset_id"],
+        )
+
     def test_upload_audio_requires_existing_entry(self) -> None:
         missing = uuid.UUID("00000000-0000-0000-0000-000000000000")
-        response = self.client.post(
-            f"/api/v1/entries/{missing}/audio",
-            data=b"abc",
-            headers={"content-type": "audio/webm", "Authorization": "Bearer entry-secret-test"},
-        )
+        with patch("app.routes.entries.enqueue_registered_job") as enqueue_mock:
+            response = self.client.post(
+                f"/api/v1/entries/{missing}/audio",
+                data=b"abc",
+                headers={"content-type": "audio/webm", "Authorization": "Bearer entry-secret-test"},
+            )
         self.assertEqual(response.status_code, 404)
+        enqueue_mock.assert_not_called()
 
     def test_upload_audio_requires_audio_content_type(self) -> None:
         entry_id = self._create_user_and_entry()
-        response = self.client.post(
-            f"/api/v1/entries/{entry_id}/audio",
-            data=b"abc",
-            headers={"content-type": "application/json", "Authorization": "Bearer entry-secret-test"},
-        )
+        with patch("app.routes.entries.enqueue_registered_job") as enqueue_mock:
+            response = self.client.post(
+                f"/api/v1/entries/{entry_id}/audio",
+                data=b"abc",
+                headers={"content-type": "application/json", "Authorization": "Bearer entry-secret-test"},
+            )
         self.assertEqual(response.status_code, 415)
+        enqueue_mock.assert_not_called()
 
 
 if __name__ == "__main__":
