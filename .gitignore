@@ -1,2 +1,7 @@
 # Ralph config (may contain API key)
-.cursor/ralph-config.json
+.cursor/ralphex-config.json
+
+# Ralphex runtime artifacts
+.ralph-worktrees/
+.ralph/parallel/
+.ralph/session_id
