@@ -78,7 +78,7 @@ if ! check_prerequisites "$WORKSPACE"; then
   exit 1
 fi
 
-init_ralph_dir "$WORKSPACE"
+init_ralphex_dir "$WORKSPACE"
 show_task_summary "$WORKSPACE"
 
 echo "Model: $MODEL"
@@ -97,7 +97,7 @@ acquire_lock() {
   local workspace="$1"
   local run_id="$2"
   local mode="$3"
-  local lockdir="$workspace/.ralph/lockdir"
+  local lockdir="$workspace/.ralphex/lockdir"
   local meta="$lockdir/meta"
   local cleanup_cmd
   printf -v cleanup_cmd 'rm -rf %q >/dev/null 2>&1 || true' "$lockdir"
@@ -174,7 +174,7 @@ if [[ "$PARALLEL_MODE" == true ]]; then
     rc=$?
     if [[ "$rc" -eq 0 ]]; then
       # Best-effort finalize: fast-forward main to integration branch recorded in run meta.
-      meta="$WORKSPACE/.ralph/parallel/$RESUME_RUN_ID/run.meta"
+      meta="$WORKSPACE/.ralphex/parallel/$RESUME_RUN_ID/run.meta"
       integration_branch=$(awk -F= '$1=="integration_branch"{print $2}' "$meta" 2>/dev/null || true)
       if [[ -n "$integration_branch" ]]; then
         git -C "$WORKSPACE" checkout "$BASE_BRANCH" >/dev/null 2>&1 || true
@@ -216,13 +216,13 @@ if [[ "$PARALLEL_MODE" == true ]]; then
     if ! git -C "$WORKSPACE" merge --ff-only "$integration_branch"; then
       echo "Failed to fast-forward main to $integration_branch." >&2
       echo "Inspect with: git log $BASE_BRANCH..$integration_branch --oneline" >&2
-      jobs_file="$WORKSPACE/.ralph/parallel/$run_id/jobs.jsonl"
+      jobs_file="$WORKSPACE/.ralphex/parallel/$run_id/jobs.jsonl"
       if [[ -f "$jobs_file" ]]; then
         jq -nc --arg run_id "$run_id" --arg status "FINALIZE_MAIN_FAILED" --arg branch "$BASE_BRANCH" --arg integration "$integration_branch" '{ts:now|todateiso8601, run_id:$run_id, status:$status, base_branch:$branch, integration_branch:$integration}' >>"$jobs_file" || true
       fi
       exit 5
     fi
-    jobs_file="$WORKSPACE/.ralph/parallel/$run_id/jobs.jsonl"
+    jobs_file="$WORKSPACE/.ralphex/parallel/$run_id/jobs.jsonl"
     if [[ -f "$jobs_file" ]]; then
       jq -nc --arg run_id "$run_id" --arg status "FINALIZE_MAIN_OK" --arg branch "$BASE_BRANCH" --arg integration "$integration_branch" '{ts:now|todateiso8601, run_id:$run_id, status:$status, base_branch:$branch, integration_branch:$integration}' >>"$jobs_file" || true
     fi
@@ -230,7 +230,7 @@ if [[ "$PARALLEL_MODE" == true ]]; then
   else
     echo "Parallel run failed. Integration branch preserved: $integration_branch" >&2
     echo "Resume later with: ./ralphex-loop.sh --parallel --resume-run $run_id -y" >&2
-    jobs_file="$WORKSPACE/.ralph/parallel/$run_id/jobs.jsonl"
+    jobs_file="$WORKSPACE/.ralphex/parallel/$run_id/jobs.jsonl"
     if [[ -f "$jobs_file" ]]; then
       jq -nc --arg run_id "$run_id" --arg status "FINALIZE_MAIN_FAILED" --arg branch "$BASE_BRANCH" --arg integration "$integration_branch" '{ts:now|todateiso8601, run_id:$run_id, status:$status, base_branch:$branch, integration_branch:$integration}' >>"$jobs_file" || true
     fi

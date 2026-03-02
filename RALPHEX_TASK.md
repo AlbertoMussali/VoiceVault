@@ -5,7 +5,7 @@ test_command: "bash -lc 'test -f Makefile && make test'"
 
 # Task: VoiceVault (aka MindVault) — Implementation Plan to V1
 
-This task file is designed for **Ralphex** (`.cursor/ralphex-scripts/*`).
+This task file is designed for **Ralphex** (`.cursor/ralphex-scripts/*`).  
 Ralphex will:
 - pick the **next unchecked** checklist line (`[ ]`) in this file
 - work only on that item
@@ -265,15 +265,15 @@ Notes:
 
 ---
 
-## Ralph Instructions (operational)
+## Ralphex Instructions (operational)
 
 1. Only work on the next unchecked task item (`[ ]`) in “Execution Checklist”.
-2. When complete, change it to `[x]` in `RALPH_TASK.md`.
+2. When complete, change it to `[x]` in `RALPHEX_TASK.md`.
 3. Keep commits small and checkpoint before risky changes.
 4. Run `make test` (or the best available target) after changes; keep it green.
-5. Update `.ralph/progress.md` with concise progress notes after significant milestones.
-6. When ALL items are `[x]`, output exactly: `<ralph>COMPLETE</ralph>`
-7. If stuck on the same blocker 3+ attempts, output exactly: `<ralph>GUTTER</ralph>`
+5. Update `.ralphex/progress.md` with concise progress notes after significant milestones.
+6. When ALL items are `[x]`, output exactly: `<ralphex>COMPLETE</ralphex>`
+7. If stuck on the same blocker 3+ attempts, output exactly: `<ralphex>GUTTER</ralphex>`
 
 ## Acceptance test scenarios (minimum bar for “ready for implementation”)
 

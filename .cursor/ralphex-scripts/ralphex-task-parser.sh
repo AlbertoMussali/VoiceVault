@@ -30,10 +30,16 @@ _meta_extract() {
 
 _parse_tasks_stream() {
   local workspace="${1:-.}"
-  local task_file="$workspace/RALPH_TASK.md"
+  local task_file=""
   local line_no=0
 
-  [[ -f "$task_file" ]] || return 1
+  if [[ -f "$workspace/RALPHEX_TASK.md" ]]; then
+    task_file="$workspace/RALPHEX_TASK.md"
+  elif [[ -f "$workspace/RALPH_TASK.md" ]]; then
+    task_file="$workspace/RALPH_TASK.md"
+  else
+    return 1
+  fi
 
   while IFS= read -r line || [[ -n "$line" ]]; do
     line_no=$((line_no + 1))
@@ -81,7 +87,7 @@ _parse_tasks_stream() {
 
 parse_tasks() {
   local workspace="${1:-.}"
-  [[ -f "$workspace/RALPH_TASK.md" ]]
+  [[ -f "$workspace/RALPHEX_TASK.md" || -f "$workspace/RALPH_TASK.md" ]]
 }
 
 get_all_tasks() {
@@ -129,8 +135,14 @@ get_task_by_id() {
 mark_task_complete() {
   local workspace="${1:-.}"
   local task_id="$2"
-  local task_file="$workspace/RALPH_TASK.md"
+  local task_file=""
   local line_no
+
+  if [[ -f "$workspace/RALPHEX_TASK.md" ]]; then
+    task_file="$workspace/RALPHEX_TASK.md"
+  else
+    task_file="$workspace/RALPH_TASK.md"
+  fi
 
   line_no=$(echo "$task_id" | sed -E 's/^line_([0-9]+)$/\1/')
   [[ "$line_no" =~ ^[0-9]+$ ]] || { echo "invalid task id: $task_id" >&2; return 1; }
@@ -145,8 +157,14 @@ mark_task_complete() {
 mark_task_incomplete() {
   local workspace="${1:-.}"
   local task_id="$2"
-  local task_file="$workspace/RALPH_TASK.md"
+  local task_file=""
   local line_no
+
+  if [[ -f "$workspace/RALPHEX_TASK.md" ]]; then
+    task_file="$workspace/RALPHEX_TASK.md"
+  else
+    task_file="$workspace/RALPH_TASK.md"
+  fi
 
   line_no=$(echo "$task_id" | sed -E 's/^line_([0-9]+)$/\1/')
   [[ "$line_no" =~ ^[0-9]+$ ]] || { echo "invalid task id: $task_id" >&2; return 1; }

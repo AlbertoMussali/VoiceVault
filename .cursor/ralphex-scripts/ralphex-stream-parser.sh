@@ -4,11 +4,11 @@
 set -euo pipefail
 
 WORKSPACE="${1:-.}"
-RALPH_DIR="$WORKSPACE/.ralph"
-SESSION_FILE="$RALPH_DIR/session_id"
+STATE_DIR="$WORKSPACE/.ralphex"
+SESSION_FILE="$STATE_DIR/session_id"
 
-mkdir -p "$RALPH_DIR"
-touch "$SESSION_FILE" "$RALPH_DIR/activity.log" "$RALPH_DIR/errors.log"
+mkdir -p "$STATE_DIR"
+touch "$SESSION_FILE" "$STATE_DIR/activity.log" "$STATE_DIR/errors.log"
 
 WARN_THRESHOLD="${RALPHEX_WARN_TOKENS:-380000}"
 ROTATE_THRESHOLD="${RALPHEX_ROTATE_TOKENS:-400000}"
@@ -19,20 +19,20 @@ trap 'rm -f "$FAILURES_FILE"' EXIT
 
 log_activity() {
   local msg="$1"
-  printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$msg" >> "$RALPH_DIR/activity.log"
+  printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$msg" >> "$STATE_DIR/activity.log"
 }
 
 log_error() {
   local msg="$1"
-  printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$msg" >> "$RALPH_DIR/errors.log"
+  printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$msg" >> "$STATE_DIR/errors.log"
 }
 
 emit_if_match() {
   local text="$1"
-  if [[ "$text" == *"<ralph>COMPLETE</ralph>"* ]]; then
+  if [[ "$text" == *"<ralphex>COMPLETE</ralphex>"* || "$text" == *"<ralph>COMPLETE</ralph>"* ]]; then
     echo "COMPLETE"
   fi
-  if [[ "$text" == *"<ralph>GUTTER</ralph>"* ]]; then
+  if [[ "$text" == *"<ralphex>GUTTER</ralphex>"* || "$text" == *"<ralph>GUTTER</ralph>"* ]]; then
     echo "GUTTER"
   fi
 }

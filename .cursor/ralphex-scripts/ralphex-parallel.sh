@@ -31,11 +31,11 @@ _read_agents_md_snippet() {
 _sync_agent_context() {
   local workspace="$1"
   local wt_dir="$2"
-  mkdir -p "$wt_dir/.ralph"
-  cp -f "$workspace/.ralph/guardrails.md" "$wt_dir/.ralph/guardrails.md" 2>/dev/null || true
-  cp -f "$workspace/.ralph/progress.md" "$wt_dir/.ralph/progress.md" 2>/dev/null || true
-  cp -f "$workspace/.ralph/errors.log" "$wt_dir/.ralph/errors.log" 2>/dev/null || true
-  cp -f "$workspace/.ralph/activity.log" "$wt_dir/.ralph/activity.log" 2>/dev/null || true
+  mkdir -p "$wt_dir/.ralphex"
+  cp -f "$(ralphex_state_dir "$workspace")/guardrails.md" "$wt_dir/.ralphex/guardrails.md" 2>/dev/null || true
+  cp -f "$(ralphex_state_dir "$workspace")/progress.md" "$wt_dir/.ralphex/progress.md" 2>/dev/null || true
+  cp -f "$(ralphex_state_dir "$workspace")/errors.log" "$wt_dir/.ralphex/errors.log" 2>/dev/null || true
+  cp -f "$(ralphex_state_dir "$workspace")/activity.log" "$wt_dir/.ralphex/activity.log" 2>/dev/null || true
   cp -f "$workspace/AGENTS.md" "$wt_dir/AGENTS.md" 2>/dev/null || true
 }
 
@@ -44,9 +44,11 @@ _create_integration_worktree() {
   local run_id="$2"
   local integration_branch="$3"
   local base_ref="$4"
-  local status_dir="$workspace/.ralph/parallel/$run_id"
+  local status_dir
+  status_dir="$(ralphex_state_dir "$workspace")/parallel/$run_id"
   local merge_log="$status_dir/merge.log"
-  local integration_dir="$workspace/.ralph/integration/$run_id"
+  local integration_dir
+  integration_dir="$(ralphex_state_dir "$workspace")/integration/$run_id"
 
   mkdir -p "$status_dir" "$(dirname "$integration_dir")"
   {
@@ -81,9 +83,11 @@ _run_agent_in_worktree() {
   local tools_required="${8:-}"
   local test_override="${9:-}"
 
-  local wt_base="$workspace/.ralph-worktrees/$run_id"
+  local wt_base
+  wt_base="$(ralphex_worktrees_dir "$workspace")/$run_id"
   local wt_dir="$wt_base/job-$job_id"
-  local status_dir="$workspace/.ralph/parallel/$run_id"
+  local status_dir
+  status_dir="$(ralphex_state_dir "$workspace")/parallel/$run_id"
   local status_file="$status_dir/job-$job_id.status"
   local log_file="$status_dir/job-$job_id.log"
   local jobs_file="$status_dir/jobs.jsonl"
@@ -116,15 +120,15 @@ Read and follow AGENTS.md FIRST. Content (truncated):
 ${agents_md:-"(AGENTS.md not found)"}
 ----------------
 
-Complete ONLY this task from RALPH_TASK.md and then stop:
+Complete ONLY this task from RALPHEX_TASK.md and then stop:
 - id: $task_id
 - line: $line_no
 - description: $task_desc
 
 Rules:
 1. Implement required file changes for this task only.
-2. Do NOT modify RALPH_TASK.md. The orchestrator will mark tasks complete.
-3. Do NOT modify anything under .ralph/.
+2. Do NOT modify RALPHEX_TASK.md. The orchestrator will mark tasks complete.
+3. Do NOT modify anything under .ralphex/.
 4. Do NOT commit; leave changes unstaged or staged.
 5. End with a concise summary.
 
@@ -133,10 +137,10 @@ Test command to run for this task (best effort): ${requested_test:-"(none config
 
 Read these files before acting:
 - AGENTS.md
-- RALPH_TASK.md
-- .ralph/guardrails.md
-- .ralph/progress.md
-- .ralph/errors.log
+- RALPHEX_TASK.md
+- .ralphex/guardrails.md
+- .ralphex/progress.md
+- .ralphex/errors.log
 EOT
 )
 
@@ -152,13 +156,13 @@ EOT
 
   if [[ "$rc" -eq 0 ]]; then
     # Enforce: never commit task/log changes from the agent worktree.
-    git -C "$wt_dir" restore -SW -- RALPH_TASK.md 2>/dev/null || true
-    rm -rf "$wt_dir/.ralph" >/dev/null 2>&1 || true
+    git -C "$wt_dir" restore -SW -- RALPHEX_TASK.md RALPH_TASK.md 2>/dev/null || true
+    rm -rf "$wt_dir/.ralphex" "$wt_dir/.ralph" >/dev/null 2>&1 || true
 
     if ! git -C "$wt_dir" diff --quiet; then
       git -C "$wt_dir" add -A
-      git -C "$wt_dir" reset -q -- RALPH_TASK.md 2>/dev/null || true
-      git -C "$wt_dir" reset -q -- .ralph 2>/dev/null || true
+      git -C "$wt_dir" reset -q -- RALPHEX_TASK.md RALPH_TASK.md 2>/dev/null || true
+      git -C "$wt_dir" reset -q -- .ralphex .ralph 2>/dev/null || true
       if ! git -C "$wt_dir" diff --cached --quiet; then
         if ! git -C "$wt_dir" -c user.name="ralphex" -c user.email="ralphex@local" commit -m "ralphex: complete $task_id" >> "$log_file" 2>&1; then
           echo "FAILED|$task_id|$branch|$wt_dir|commit_failed" > "$status_file"
@@ -212,12 +216,14 @@ _auto_resolve_merge_conflict() {
   local integration_branch="$3"
   local task_id="$4"
   local task_branch="$5"
-  local status_dir="$workspace/.ralph/parallel/$run_id"
+  local status_dir
+  status_dir="$(ralphex_state_dir "$workspace")/parallel/$run_id"
   local merge_log="$status_dir/merge.log"
   local jobs_file="$status_dir/jobs.jsonl"
 
   local mergefix_branch="ralphex/mergefix-${run_id}-${task_id}"
-  local fix_dir="$workspace/.ralph/merge-fix/$run_id/$task_id"
+  local fix_dir
+  fix_dir="$(ralphex_state_dir "$workspace")/merge-fix/$run_id/$task_id"
   mkdir -p "$(dirname "$fix_dir")"
 
   _run_log_json "$jobs_file" --arg run_id "$run_id" --arg task_id "$task_id" --arg branch "$task_branch" --arg status "MERGE_FIX_STARTED" '{ts:now|todateiso8601, run_id:$run_id, task_id:$task_id, branch:$branch, status:$status}'
@@ -252,7 +258,7 @@ Goal:
 - Resolve merge conflicts and keep the intent of BOTH branches.
 
 Hard rules:
-1. Do NOT modify RALPH_TASK.md or anything under .ralph/.
+1. Do NOT modify RALPHEX_TASK.md or anything under .ralphex/.
 2. Prefer keeping both changes. If truly incompatible, keep the integration branch behavior unless the task branch is clearly the intended new behavior.
 3. After resolving conflicts, run the repo test command if available and report results.
 
@@ -272,8 +278,8 @@ EOT
   fi
 
   # Enforce: never commit task/log changes.
-  (cd "$fix_dir" && git restore -SW -- RALPH_TASK.md 2>/dev/null || true)
-  rm -rf "$fix_dir/.ralph" >/dev/null 2>&1 || true
+  (cd "$fix_dir" && git restore -SW -- RALPHEX_TASK.md RALPH_TASK.md 2>/dev/null || true)
+  rm -rf "$fix_dir/.ralphex" "$fix_dir/.ralph" >/dev/null 2>&1 || true
 
   local unresolved
   unresolved=$(cd "$fix_dir" && git diff --name-only --diff-filter=U || true)
@@ -283,8 +289,8 @@ EOT
   fi
 
   (cd "$fix_dir" && git add -A)
-  (cd "$fix_dir" && git reset -q -- RALPH_TASK.md 2>/dev/null || true)
-  (cd "$fix_dir" && git reset -q -- .ralph 2>/dev/null || true)
+  (cd "$fix_dir" && git reset -q -- RALPHEX_TASK.md RALPH_TASK.md 2>/dev/null || true)
+  (cd "$fix_dir" && git reset -q -- .ralphex .ralph 2>/dev/null || true)
 
   if ! (cd "$fix_dir" && git -c user.name="ralphex" -c user.email="ralphex@local" commit --no-edit) >>"$merge_log" 2>&1; then
     echo "merge-fix commit failed for $mergefix_branch" >>"$merge_log"
@@ -325,8 +331,12 @@ _mark_task_complete_in_integration() {
   local merge_log="$3"
 
   mark_task_complete "$integration_dir" "$task_id" || true
-  if ! git -C "$integration_dir" diff --quiet -- RALPH_TASK.md 2>/dev/null; then
-    git -C "$integration_dir" add RALPH_TASK.md >/dev/null 2>&1 || true
+  local task_file_rel="RALPHEX_TASK.md"
+  if [[ ! -f "$integration_dir/$task_file_rel" ]]; then
+    task_file_rel="RALPH_TASK.md"
+  fi
+  if [[ -f "$integration_dir/$task_file_rel" ]] && ! git -C "$integration_dir" diff --quiet -- "$task_file_rel" 2>/dev/null; then
+    git -C "$integration_dir" add "$task_file_rel" >/dev/null 2>&1 || true
     git -C "$integration_dir" -c user.name="ralphex" -c user.email="ralphex@local" commit -m "ralphex: mark $task_id complete" >>"$merge_log" 2>&1 || true
   fi
 }
@@ -335,7 +345,8 @@ resume_parallel_run() {
   local workspace="$1"
   local run_id="$2"
 
-  local status_dir="$workspace/.ralph/parallel/$run_id"
+  local status_dir
+  status_dir="$(ralphex_state_dir "$workspace")/parallel/$run_id"
   local merge_log="$status_dir/merge.log"
   local jobs_file="$status_dir/jobs.jsonl"
   local meta="$status_dir/run.meta"
@@ -382,7 +393,8 @@ repair_parallel_run() {
   local workspace="$1"
   local run_id="$2"
 
-  local status_dir="$workspace/.ralph/parallel/$run_id"
+  local status_dir
+  status_dir="$(ralphex_state_dir "$workspace")/parallel/$run_id"
   local merge_log="$status_dir/merge.log"
   local jobs_file="$status_dir/jobs.jsonl"
   local meta="$status_dir/run.meta"
@@ -461,12 +473,13 @@ run_parallel_tasks() {
   [[ -n "$run_id" ]] || run_id=$(date '+%Y%m%d%H%M%S')
   [[ -n "$integration_branch" ]] || integration_branch="ralphex/integration-$run_id"
 
-  local status_dir="$workspace/.ralph/parallel/$run_id"
+  local status_dir
+  status_dir="$(ralphex_state_dir "$workspace")/parallel/$run_id"
   local merge_log="$status_dir/merge.log"
   local jobs_file="$status_dir/jobs.jsonl"
   mkdir -p "$status_dir"
 
-  init_ralph_dir "$workspace"
+  init_ralphex_dir "$workspace"
   log_activity "$workspace" "parallel run start: run_id=$run_id integration=$integration_branch base=$base_ref"
 
   echo "Ralphex parallel run: $run_id"
@@ -674,7 +687,8 @@ cleanup_parallel_run() {
   local workspace="$1"
   local run_id="$2"
   local integration_branch="$3"
-  local integration_dir="$workspace/.ralph/integration/$run_id"
+  local integration_dir
+  integration_dir="$(ralphex_state_dir "$workspace")/integration/$run_id"
   git -C "$workspace" worktree remove -f "$integration_dir" >/dev/null 2>&1 || true
   git -C "$workspace" branch -D "$integration_branch" >/dev/null 2>&1 || true
 }

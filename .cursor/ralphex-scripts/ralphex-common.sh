@@ -17,17 +17,55 @@ RALPHEX_WARN_TOKENS="${RALPHEX_WARN_TOKENS:-380000}"
 RALPHEX_ROTATE_TOKENS="${RALPHEX_ROTATE_TOKENS:-400000}"
 export RALPHEX_WARN_TOKENS RALPHEX_ROTATE_TOKENS
 
+STATE_DIR_NAME=".ralphex"
+LEGACY_STATE_DIR_NAME=".ralph"
+WORKTREES_DIR_NAME=".ralphex-worktrees"
+LEGACY_WORKTREES_DIR_NAME=".ralph-worktrees"
+TASK_FILE_NAME="RALPHEX_TASK.md"
+LEGACY_TASK_FILE_NAME="RALPH_TASK.md"
+
+ralphex_state_dir() {
+  local workspace="${1:-.}"
+  echo "$workspace/$STATE_DIR_NAME"
+}
+
+ralphex_worktrees_dir() {
+  local workspace="${1:-.}"
+  echo "$workspace/$WORKTREES_DIR_NAME"
+}
+
+ralphex_task_file() {
+  local workspace="${1:-.}"
+  if [[ -f "$workspace/$TASK_FILE_NAME" ]]; then
+    echo "$workspace/$TASK_FILE_NAME"
+  else
+    echo "$workspace/$LEGACY_TASK_FILE_NAME"
+  fi
+}
+
+migrate_legacy_ralph_state() {
+  local workspace="${1:-.}"
+
+  if [[ -d "$workspace/$LEGACY_STATE_DIR_NAME" && ! -d "$workspace/$STATE_DIR_NAME" ]]; then
+    mv "$workspace/$LEGACY_STATE_DIR_NAME" "$workspace/$STATE_DIR_NAME" 2>/dev/null || true
+  fi
+  if [[ -d "$workspace/$LEGACY_WORKTREES_DIR_NAME" && ! -d "$workspace/$WORKTREES_DIR_NAME" ]]; then
+    mv "$workspace/$LEGACY_WORKTREES_DIR_NAME" "$workspace/$WORKTREES_DIR_NAME" 2>/dev/null || true
+  fi
+}
+
 get_iteration() {
   local workspace="${1:-.}"
-  local f="$workspace/.ralph/.iteration"
+  local f
+  f="$(ralphex_state_dir "$workspace")/.iteration"
   [[ -f "$f" ]] && cat "$f" || echo "0"
 }
 
 set_iteration() {
   local workspace="$1"
   local iteration="$2"
-  mkdir -p "$workspace/.ralph"
-  echo "$iteration" > "$workspace/.ralph/.iteration"
+  mkdir -p "$(ralphex_state_dir "$workspace")"
+  echo "$iteration" > "$(ralphex_state_dir "$workspace")/.iteration"
 }
 
 increment_iteration() {
@@ -42,31 +80,34 @@ increment_iteration() {
 log_activity() {
   local workspace="$1"
   local msg="$2"
-  mkdir -p "$workspace/.ralph"
-  printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$msg" >> "$workspace/.ralph/activity.log"
+  mkdir -p "$(ralphex_state_dir "$workspace")"
+  printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$msg" >> "$(ralphex_state_dir "$workspace")/activity.log"
 }
 
 log_error() {
   local workspace="$1"
   local msg="$2"
-  mkdir -p "$workspace/.ralph"
-  printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$msg" >> "$workspace/.ralph/errors.log"
+  mkdir -p "$(ralphex_state_dir "$workspace")"
+  printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$msg" >> "$(ralphex_state_dir "$workspace")/errors.log"
 }
 
 log_progress() {
   local workspace="$1"
   local msg="$2"
-  local f="$workspace/.ralph/progress.md"
-  mkdir -p "$workspace/.ralph"
+  local f
+  f="$(ralphex_state_dir "$workspace")/progress.md"
+  mkdir -p "$(ralphex_state_dir "$workspace")"
   [[ -f "$f" ]] || echo -e "# Progress Log\n" > "$f"
   echo "" >> "$f"
   echo "### $(date '+%Y-%m-%d %H:%M:%S')" >> "$f"
   echo "$msg" >> "$f"
 }
 
-init_ralph_dir() {
+init_ralphex_dir() {
   local workspace="$1"
-  local d="$workspace/.ralph"
+  migrate_legacy_ralph_state "$workspace"
+  local d
+  d="$(ralphex_state_dir "$workspace")"
   mkdir -p "$d"
 
   [[ -f "$d/.iteration" ]] || echo "0" > "$d/.iteration"
@@ -117,7 +158,8 @@ is_git_repo() {
 
 extract_test_command() {
   local workspace="${1:-.}"
-  local task_file="$workspace/RALPH_TASK.md"
+  local task_file
+  task_file="$(ralphex_task_file "$workspace")"
   awk '
     BEGIN {in_yaml=0; done=0}
     /^---[[:space:]]*$/ {
@@ -152,7 +194,9 @@ EOT
 
 show_task_summary() {
   local workspace="$1"
-  echo "Task file: $workspace/RALPH_TASK.md"
+  local task_file
+  task_file="$(ralphex_task_file "$workspace")"
+  echo "Task file: $task_file"
   local progress
   progress=$(get_progress "$workspace" || echo "0|0")
   local done total
@@ -170,7 +214,7 @@ build_iteration_prompt() {
   cat <<EOT
 You are running inside the Ralphex loop.
 
-Focus ONLY on this task item from RALPH_TASK.md:
+Focus ONLY on this task item from RALPHEX_TASK.md:
 - id: $task_id
 - line: $line_no
 - description: $task_desc
@@ -179,28 +223,29 @@ Required behavior:
 1. Implement the needed code changes in this workspace.
 2. Mark the target checkbox item as [x] when done.
 3. Run relevant tests/commands to validate your changes.
-4. Update .ralph/progress.md with a concise summary.
-5. If all task checkboxes are complete, output exactly: <ralph>COMPLETE</ralph>
-6. If you are stuck after repeated failed attempts, output exactly: <ralph>GUTTER</ralph>
+4. Update .ralphex/progress.md with a concise summary.
+5. If all task checkboxes are complete, output exactly: <ralphex>COMPLETE</ralphex>
+6. If you are stuck after repeated failed attempts, output exactly: <ralphex>GUTTER</ralphex>
 
 Read these files first:
-- RALPH_TASK.md
-- .ralph/guardrails.md
-- .ralph/progress.md
-- .ralph/errors.log
+- RALPHEX_TASK.md
+- .ralphex/guardrails.md
+- .ralphex/progress.md
+- .ralphex/errors.log
 EOT
 }
 
 _reset_session() {
   local workspace="$1"
-  : > "$workspace/.ralph/session_id"
+  : > "$(ralphex_state_dir "$workspace")/session_id"
 }
 
 _run_codex_once() {
   local workspace="$1"
   local prompt="$2"
   local script_dir="$3"
-  local session_file="$workspace/.ralph/session_id"
+  local session_file
+  session_file="$(ralphex_state_dir "$workspace")/session_id"
   local session_id=""
 
   [[ -f "$session_file" ]] || : > "$session_file"
@@ -320,7 +365,7 @@ run_iteration() {
   test_cmd=$(extract_test_command "$workspace" || true)
   if [[ -n "$test_cmd" ]]; then
     set +e
-    (cd "$workspace" && eval "$test_cmd") >> "$workspace/.ralph/activity.log" 2>> "$workspace/.ralph/errors.log"
+    (cd "$workspace" && eval "$test_cmd") >> "$(ralphex_state_dir "$workspace")/activity.log" 2>> "$(ralphex_state_dir "$workspace")/errors.log"
     local test_rc=$?
     set -e
     if [[ "$test_rc" -ne 0 ]]; then
@@ -391,9 +436,11 @@ run_ralphex_loop() {
 
 check_prerequisites() {
   local workspace="$1"
+  local task_file
+  task_file="$(ralphex_task_file "$workspace")"
 
-  if [[ ! -f "$workspace/RALPH_TASK.md" ]]; then
-    echo "Missing $workspace/RALPH_TASK.md" >&2
+  if [[ ! -f "$task_file" ]]; then
+    echo "Missing task file: $task_file" >&2
     return 1
   fi
 

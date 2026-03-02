@@ -14,10 +14,10 @@ if ! command -v codex >/dev/null 2>&1; then
 fi
 
 mkdir -p "$TARGET/.cursor/ralphex-scripts"
-mkdir -p "$TARGET/.ralph"
+mkdir -p "$TARGET/.ralphex"
 
-if [[ ! -f "$TARGET/RALPH_TASK.md" ]]; then
-  cat > "$TARGET/RALPH_TASK.md" <<'EOT'
+if [[ ! -f "$TARGET/RALPHEX_TASK.md" ]]; then
+  cat > "$TARGET/RALPHEX_TASK.md" <<'EOT'
 ---
 task: Describe your task
 test_command: "echo no tests configured"
@@ -39,15 +39,15 @@ for f in "$SCRIPT_DIR"/*.sh; do
   chmod +x "$TARGET/.cursor/ralphex-scripts/$(basename "$f")"
 done
 
-[[ -f "$TARGET/.ralph/.iteration" ]] || echo "0" > "$TARGET/.ralph/.iteration"
-[[ -f "$TARGET/.ralph/session_id" ]] || : > "$TARGET/.ralph/session_id"
-[[ -f "$TARGET/.ralph/activity.log" ]] || echo "# Activity Log" > "$TARGET/.ralph/activity.log"
-[[ -f "$TARGET/.ralph/errors.log" ]] || echo "# Error Log" > "$TARGET/.ralph/errors.log"
-[[ -f "$TARGET/.ralph/progress.md" ]] || echo "# Progress Log" > "$TARGET/.ralph/progress.md"
-[[ -f "$TARGET/.ralph/guardrails.md" ]] || echo "# Ralphex Guardrails" > "$TARGET/.ralph/guardrails.md"
+[[ -f "$TARGET/.ralphex/.iteration" ]] || echo "0" > "$TARGET/.ralphex/.iteration"
+[[ -f "$TARGET/.ralphex/session_id" ]] || : > "$TARGET/.ralphex/session_id"
+[[ -f "$TARGET/.ralphex/activity.log" ]] || echo "# Activity Log" > "$TARGET/.ralphex/activity.log"
+[[ -f "$TARGET/.ralphex/errors.log" ]] || echo "# Error Log" > "$TARGET/.ralphex/errors.log"
+[[ -f "$TARGET/.ralphex/progress.md" ]] || echo "# Progress Log" > "$TARGET/.ralphex/progress.md"
+[[ -f "$TARGET/.ralphex/guardrails.md" ]] || echo "# Ralphex Guardrails" > "$TARGET/.ralphex/guardrails.md"
 
 if [[ -f "$TARGET/.gitignore" ]]; then
-  if ! grep -q '^\.cursor/ralph-config\.json$' "$TARGET/.gitignore"; then
+  if ! grep -q '^\.cursor/ralphex-config\.json$' "$TARGET/.gitignore"; then
     {
       echo ""
       echo "# Ralphex config"

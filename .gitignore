@@ -1,5 +1,4 @@
-# Ralph config (may contain API key)
-.cursor/ralph-config.json
+# Ralphex config (may contain API key)
 .cursor/ralphex-config.json
 
 # Environment files
@@ -8,12 +7,16 @@
 .env.*.local
 
 # Ralphex runtime artifacts
-.ralph-worktrees/
-.ralph/parallel/
-.ralph/session_id
+.ralphex-worktrees/
+.ralphex/parallel/
+.ralphex/session_id
 
 # Local ralphex logs/state (keep out of git to avoid merge churn)
+.ralphex/
+
+# Legacy (removed): kept ignored to avoid local noise
 .ralph/
+.ralph-worktrees/
 
 # Python
 **/__pycache__/

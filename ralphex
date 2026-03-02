@@ -51,18 +51,18 @@ EOT
 }
 
 _lock_meta() {
-  local meta="$WORKSPACE/.ralph/lockdir/meta"
+  local meta="$WORKSPACE/.ralphex/lockdir/meta"
   [[ -f "$meta" ]] && cat "$meta"
 }
 
 _active_run_id() {
-  local meta="$WORKSPACE/.ralph/lockdir/meta"
+  local meta="$WORKSPACE/.ralphex/lockdir/meta"
   if [[ -f "$meta" ]]; then
     awk -F= '$1=="run_id"{print $2}' "$meta"
     return 0
   fi
   local latest
-  latest=$(ls -1 "$WORKSPACE/.ralph/parallel" 2>/dev/null | sort -r | head -n 1 || true)
+  latest=$(ls -1 "$WORKSPACE/.ralphex/parallel" 2>/dev/null | sort -r | head -n 1 || true)
   [[ -n "$latest" ]] && echo "$latest"
 }
 
@@ -80,6 +80,9 @@ doctor() {
   echo "Ralphex doctor"
   echo "Workspace: $WORKSPACE"
   echo ""
+
+  # Ensure state dir exists (and migrate legacy `.ralph` state if present).
+  init_ralphex_dir "$WORKSPACE" >/dev/null 2>&1 || true
 
   local had_errors=0
   local had_warnings=0
@@ -121,11 +124,13 @@ doctor() {
     echo "[OK] AGENTS.md present"
   fi
 
-  if [[ ! -f "$WORKSPACE/RALPH_TASK.md" ]]; then
-    echo "[RED] RALPH_TASK.md missing"
+  if [[ ! -f "$WORKSPACE/RALPHEX_TASK.md" && ! -f "$WORKSPACE/RALPH_TASK.md" ]]; then
+    echo "[RED] RALPHEX_TASK.md missing"
     had_errors=1
   else
-    echo "[OK] RALPH_TASK.md present"
+    local task_file="RALPHEX_TASK.md"
+    [[ -f "$WORKSPACE/$task_file" ]] || task_file="RALPH_TASK.md"
+    echo "[OK] $task_file present"
     local progress
     progress=$(get_progress "$WORKSPACE" || echo "0|0")
     echo "[OK] task progress: ${progress%|*}/${progress#*|}"
@@ -197,7 +202,7 @@ status_cmd() {
     return 0
   fi
 
-  local dir="$WORKSPACE/.ralph/parallel/$run_id"
+  local dir="$WORKSPACE/.ralphex/parallel/$run_id"
   local meta="$dir/run.meta"
   local jobs="$dir/jobs.jsonl"
 
@@ -262,7 +267,7 @@ watch_cmd() {
     date
     status_cmd "$run_id" || true
     echo ""
-    local dir="$WORKSPACE/.ralph/parallel/$run_id"
+    local dir="$WORKSPACE/.ralphex/parallel/$run_id"
     [[ -f "$dir/merge_failures.log" ]] && tail -n 10 "$dir/merge_failures.log" || true
     sleep "$interval"
   done
@@ -275,18 +280,18 @@ clean_cmd() {
     return 1
   fi
 
-  echo "Cleaning run: $run_id (preserving logs in .ralph/parallel/$run_id)"
-  rm -rf "$WORKSPACE/.ralph-worktrees/$run_id" >/dev/null 2>&1 || true
-  rm -rf "$WORKSPACE/.ralph/merge-fix/$run_id" >/dev/null 2>&1 || true
-  rm -rf "$WORKSPACE/.ralph/integration/$run_id" >/dev/null 2>&1 || true
+  echo "Cleaning run: $run_id (preserving logs in .ralphex/parallel/$run_id)"
+  rm -rf "$WORKSPACE/.ralphex-worktrees/$run_id" >/dev/null 2>&1 || true
+  rm -rf "$WORKSPACE/.ralphex/merge-fix/$run_id" >/dev/null 2>&1 || true
+  rm -rf "$WORKSPACE/.ralphex/integration/$run_id" >/dev/null 2>&1 || true
 
   # Remove stale lock if present and dead.
-  local meta="$WORKSPACE/.ralph/lockdir/meta"
+  local meta="$WORKSPACE/.ralphex/lockdir/meta"
   if [[ -f "$meta" ]]; then
     local pid
     pid=$(awk -F= '$1=="pid"{print $2}' "$meta")
     if [[ -n "$pid" ]] && ! kill -0 "$pid" 2>/dev/null; then
-      rm -rf "$WORKSPACE/.ralph/lockdir" >/dev/null 2>&1 || true
+      rm -rf "$WORKSPACE/.ralphex/lockdir" >/dev/null 2>&1 || true
       echo "Removed stale lock."
     fi
   fi
