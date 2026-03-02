@@ -170,15 +170,15 @@ Notes:
   - Done when: response includes `{entry_id, transcript_id, snippet_text, start_char, end_char}`.
 - [x] [FE] Implement timeline UI with filters (date range, type, context, tags). <!-- group: 500 -->
   - Done when: browsing feels responsive and predictable.
-- [ ] [FE] Implement search UI: query box + results + jump-to-highlight. <!-- group: 500 -->
+- [x] [FE] Implement search UI: query box + results + jump-to-highlight. <!-- group: 500 -->
   - Done when: click result opens entry and highlights matching span.
-- [ ] [FE] Implement quote chip on timeline cards. <!-- group: 500 -->
+- [x] [FE] Implement quote chip on timeline cards. <!-- group: 500 -->
   - Done when: cards show a credible “receipt” snippet consistently.
-- [ ] [BE] Implement auto-quote selection rule when no explicit snippet. <!-- group: 500 -->
+- [x] [BE] Implement auto-quote selection rule when no explicit snippet. <!-- group: 500 -->
   - Done when: quote chip is meaningful (not empty/garbage).
-- [ ] [FE] Implement transcript highlight navigation (scroll + span highlight). <!-- group: 500 -->
+- [x] [FE] Implement transcript highlight navigation (scroll + span highlight). <!-- group: 500 -->
   - Done when: highlight lands accurately by offsets.
-- [ ] [QA] Add E2E test: create entry → search term → open highlight. <!-- group: 500 -->
+- [x] [QA] Add E2E test: create entry → search term → open highlight. <!-- group: 500 -->
   - Done when: runs in CI reliably.
 
 ## Phase 5 — Brag Doc v0 (career wedge, exportable)

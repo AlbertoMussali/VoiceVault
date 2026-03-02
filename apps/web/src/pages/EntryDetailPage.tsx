@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 
 import { Button } from '@/components/ui/Button';
 import { EntryApiError, fetchEntryAudioBlob, fetchEntryDetail, type EntryDetail } from '@/lib/entries';
@@ -8,6 +8,27 @@ type AudioState = {
   src: string | null;
   isObjectUrl: boolean;
 };
+
+type HighlightRange = {
+  start: number;
+  end: number;
+};
+
+function parseHighlightRange(searchParams: URLSearchParams): HighlightRange | null {
+  const startRaw = searchParams.get('start');
+  const endRaw = searchParams.get('end');
+  if (startRaw === null || endRaw === null) {
+    return null;
+  }
+
+  const start = Number(startRaw);
+  const end = Number(endRaw);
+  if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end <= start) {
+    return null;
+  }
+
+  return { start, end };
+}
 
 function formatStatus(status: string | null): string {
   if (!status) {
@@ -36,11 +57,13 @@ function buildEntryErrorMessage(error: unknown): string {
 export function EntryDetailPage() {
   const { entryId } = useParams<{ entryId: string }>();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
 
   const [entry, setEntry] = useState<EntryDetail | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [audioState, setAudioState] = useState<AudioState>({ src: null, isObjectUrl: false });
+  const highlightRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     if (!entryId) {
@@ -109,13 +132,49 @@ export function EntryDetailPage() {
   }, [audioState]);
 
   const transcriptText = useMemo(() => {
-    if (!entry?.transcriptText) {
+    if (typeof entry?.transcriptText !== 'string') {
       return null;
     }
 
-    const normalized = entry.transcriptText.trim();
-    return normalized.length > 0 ? normalized : null;
+    return entry.transcriptText.length > 0 ? entry.transcriptText : null;
   }, [entry?.transcriptText]);
+  const highlightRange = useMemo(() => parseHighlightRange(searchParams), [searchParams]);
+  const highlightQuery = useMemo(() => searchParams.get('q')?.trim() ?? '', [searchParams]);
+  const clampedHighlightRange = useMemo(() => {
+    if (!transcriptText || !highlightRange) {
+      return null;
+    }
+
+    if (highlightRange.start >= transcriptText.length) {
+      return null;
+    }
+
+    const safeEnd = Math.min(highlightRange.end, transcriptText.length);
+    if (safeEnd <= highlightRange.start) {
+      return null;
+    }
+
+    return { start: highlightRange.start, end: safeEnd };
+  }, [highlightRange, transcriptText]);
+
+  useEffect(() => {
+    if (!clampedHighlightRange) {
+      return;
+    }
+
+    const target = highlightRef.current;
+    if (!target) {
+      return;
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
+
+    return () => {
+      window.cancelAnimationFrame(frame);
+    };
+  }, [clampedHighlightRange, transcriptText]);
 
   return (
     <main className="min-h-screen bg-gradient-to-br from-sky-50 via-cyan-50 to-emerald-100 p-6">
@@ -157,8 +216,30 @@ export function EntryDetailPage() {
 
             <section className="mt-6 rounded-md border bg-background p-4">
               <h2 className="text-base font-semibold">Transcript</h2>
+              {clampedHighlightRange ? (
+                <p className="mt-2 text-xs text-muted-foreground">
+                  Highlighted match
+                  {highlightQuery ? ` for "${highlightQuery}"` : ''}:{' '}
+                  {clampedHighlightRange.start}-{clampedHighlightRange.end}
+                </p>
+              ) : null}
               {transcriptText ? (
-                <pre className="mt-3 whitespace-pre-wrap break-words text-sm leading-6 text-foreground">{transcriptText}</pre>
+                <pre className="mt-3 whitespace-pre-wrap break-words text-sm leading-6 text-foreground">
+                  {clampedHighlightRange ? (
+                    <>
+                      {transcriptText.slice(0, clampedHighlightRange.start)}
+                      <span
+                        ref={highlightRef}
+                        className="rounded bg-amber-200/90 px-0.5 text-foreground shadow-[0_0_0_2px_rgba(245,158,11,0.25)]"
+                      >
+                        {transcriptText.slice(clampedHighlightRange.start, clampedHighlightRange.end)}
+                      </span>
+                      {transcriptText.slice(clampedHighlightRange.end)}
+                    </>
+                  ) : (
+                    transcriptText
+                  )}
+                </pre>
               ) : (
                 <p className="mt-3 text-sm text-muted-foreground">Transcript is not available yet for this entry.</p>
               )}

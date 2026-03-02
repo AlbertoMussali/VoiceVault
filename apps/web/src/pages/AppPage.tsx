@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ChangeEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import { useAuth } from '@/auth/AuthProvider';
@@ -9,6 +9,8 @@ import {
   fetchEntriesTimeline,
   fetchEntryDetail,
   fetchEntryStatus,
+  searchEntries,
+  type SearchResult,
   type TimelineEntry,
   updateEntryTranscript,
   uploadEntryAudio
@@ -34,14 +36,67 @@ type TimelineEntryRecord = {
   type: string | null;
   context: EntryContext | null;
   tags: string[];
+  quote: string | null;
 };
 
 const READY_STATUSES = new Set(['ready', 'completed', 'done']);
 const ERROR_STATUSES = new Set(['error', 'failed', 'fatal']);
 const MAX_STATUS_POLLS = 40;
+const SEARCH_RESULT_LIMIT = 12;
 const INDEXING_STORAGE_KEY = 'voicevault.entry-indexing.v1';
 const TIMELINE_STORAGE_KEY = 'voicevault.timeline.v1';
 const ENTRY_TYPE_OPTIONS = ['win', 'blocker', 'idea', 'task', 'learning'];
+const MAX_QUOTE_CHARS = 160;
+
+function normalizeQuote(raw: string | null | undefined): string | null {
+  if (typeof raw !== 'string') {
+    return null;
+  }
+
+  const normalized = raw.replace(/\s+/g, ' ').trim();
+  if (!normalized) {
+    return null;
+  }
+
+  if (normalized.length <= MAX_QUOTE_CHARS) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, MAX_QUOTE_CHARS - 1).trimEnd()}…`;
+}
+
+function quoteFromTranscript(text: string | null | undefined): string | null {
+  if (typeof text !== 'string') {
+    return null;
+  }
+
+  const normalized = text.replace(/\s+/g, ' ').trim();
+  if (!normalized) {
+    return null;
+  }
+
+  const firstSentence = normalized.match(/.*?[.!?](?:\s|$)/)?.[0]?.trim();
+  return normalizeQuote(firstSentence ?? normalized);
+}
+
+function isFallbackEntryTitle(title: string | null): boolean {
+  if (!title) {
+    return true;
+  }
+  return /^Entry [a-f0-9]{8}$/i.test(title.trim());
+}
+
+function getTimelineQuoteChipText(entry: TimelineEntryRecord): string {
+  if (entry.quote) {
+    return `"${entry.quote}"`;
+  }
+
+  if (entry.title && !isFallbackEntryTitle(entry.title)) {
+    return `"${normalizeQuote(entry.title) ?? entry.title}"`;
+  }
+
+  return 'Receipt pending: open entry for transcript quote.';
+}
 
 function parseTags(rawTags: string): string[] {
   const next = rawTags
@@ -147,7 +202,8 @@ function readStoredTimeline(): Record<string, TimelineEntryRecord> {
         occurredAt: typeof record.occurredAt === 'string' ? record.occurredAt : null,
         type,
         context,
-        tags: Array.from(new Set(tags))
+        tags: Array.from(new Set(tags)),
+        quote: normalizeQuote(typeof record.quote === 'string' ? record.quote : null)
       };
     }
 
@@ -198,7 +254,8 @@ function mapTimelineEntry(entry: TimelineEntry): TimelineEntryRecord {
     occurredAt: normalizeIsoDate(entry.occurredAt),
     type,
     context,
-    tags: Array.from(new Set(entry.tags.map((tag) => tag.trim().toLowerCase()).filter((tag) => tag.length > 0)))
+    tags: Array.from(new Set(entry.tags.map((tag) => tag.trim().toLowerCase()).filter((tag) => tag.length > 0))),
+    quote: normalizeQuote(entry.quote)
   };
 }
 
@@ -260,6 +317,11 @@ export function AppPage() {
   const [timelineTypeFilter, setTimelineTypeFilter] = useState<'all' | string>('all');
   const [timelineContextFilter, setTimelineContextFilter] = useState<'all' | EntryContext>('all');
   const [timelineTagFilterInput, setTimelineTagFilterInput] = useState('');
+  const [searchQueryInput, setSearchQueryInput] = useState('');
+  const [submittedSearchQuery, setSubmittedSearchQuery] = useState('');
+  const [isSearchLoading, setIsSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [isIndexingModalOpen, setIsIndexingModalOpen] = useState(false);
   const [indexType, setIndexType] = useState('');
   const [indexContext, setIndexContext] = useState<EntryContext | null>(null);
@@ -312,7 +374,8 @@ export function AppPage() {
                 ...mapped,
                 type: existing?.type ?? mapped.type,
                 context: existing?.context ?? mapped.context,
-                tags: existing?.tags && existing.tags.length > 0 ? existing.tags : mapped.tags
+                tags: existing?.tags && existing.tags.length > 0 ? existing.tags : mapped.tags,
+                quote: existing?.quote ?? mapped.quote
               };
             }
             writeStoredTimeline(next);
@@ -355,7 +418,8 @@ export function AppPage() {
         occurredAt: patch.occurredAt ?? existing?.occurredAt ?? null,
         type: patch.type ?? existing?.type ?? null,
         context: patch.context ?? existing?.context ?? null,
-        tags: patch.tags ?? existing?.tags ?? []
+        tags: patch.tags ?? existing?.tags ?? [],
+        quote: patch.quote ?? existing?.quote ?? null
       };
       const updated = { ...previous, [entryId]: next };
       writeStoredTimeline(updated);
@@ -392,6 +456,7 @@ export function AppPage() {
     if (!isEditingTranscript) {
       setTranscriptDraft(detail.transcript.text);
     }
+    upsertTimelineEntry(targetEntryId, { quote: quoteFromTranscript(detail.transcript.text) });
   }
 
   function resetIndexingDraft() {
@@ -528,6 +593,29 @@ export function AppPage() {
     setIsEditingTranscript(false);
   }
 
+  async function handleSearchSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const query = searchQueryInput.trim();
+    setSubmittedSearchQuery(query);
+    setSearchError(null);
+
+    if (!query) {
+      setSearchResults([]);
+      return;
+    }
+
+    setIsSearchLoading(true);
+    try {
+      const results = await searchEntries(query, SEARCH_RESULT_LIMIT);
+      setSearchResults(results);
+    } catch (error) {
+      setSearchError(error instanceof Error ? error.message : 'Search failed.');
+      setSearchResults([]);
+    } finally {
+      setIsSearchLoading(false);
+    }
+  }
+
   async function pollUntilComplete(nextEntryId: string) {
     let pollAttempts = 0;
 
@@ -645,7 +733,12 @@ export function AppPage() {
         currentEntryId = created.entryId;
         setEntryId(created.entryId);
         setEntryStatus(created.status);
-        upsertTimelineEntry(created.entryId, { status: created.status, createdAt: new Date().toISOString() });
+        upsertTimelineEntry(created.entryId, {
+          status: created.status,
+          title: created.title ?? null,
+          createdAt: new Date().toISOString(),
+          quote: null
+        });
       }
       if (!currentEntryId) {
         throw new Error('Entry creation did not return an id.');
@@ -727,6 +820,7 @@ export function AppPage() {
       setIsTranscriptEdited(true);
       setIsEditingTranscript(false);
       setTranscriptDraft(transcript.text);
+      upsertTimelineEntry(entryId, { quote: quoteFromTranscript(transcript.text) });
       const versionLabel = transcript.version !== null ? `version ${transcript.version}` : 'a new version';
       setTranscriptNotice(`Saved ${versionLabel}.`);
     } catch (error) {
@@ -818,6 +912,7 @@ export function AppPage() {
 
     return true;
   });
+  const hasSearchAttempt = useMemo(() => submittedSearchQuery.length > 0, [submittedSearchQuery]);
 
   return (
     <main className="min-h-screen bg-gradient-to-br from-sky-50 via-cyan-50 to-emerald-100 p-6">
@@ -992,6 +1087,60 @@ export function AppPage() {
         </div>
         <div className="mt-6 space-y-4 rounded-md border bg-background p-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
+            <h2 className="text-base font-semibold">Search</h2>
+            <span className="text-xs text-muted-foreground">Transcript search with highlight jump</span>
+          </div>
+          <form onSubmit={handleSearchSubmit} className="flex flex-col gap-3 sm:flex-row">
+            <input
+              type="search"
+              value={searchQueryInput}
+              onChange={(event) => setSearchQueryInput(event.target.value)}
+              placeholder="Search transcripts..."
+              className="h-10 w-full rounded-md border bg-background px-3 text-sm"
+            />
+            <Button type="submit" disabled={isSearchLoading} className="sm:w-auto">
+              {isSearchLoading ? 'Searching...' : 'Search'}
+            </Button>
+          </form>
+          {searchError ? <p className="text-sm text-destructive">{searchError}</p> : null}
+          {isSearchLoading ? <p className="text-sm text-muted-foreground">Loading results...</p> : null}
+          {searchResults.length > 0 ? (
+            <div className="space-y-3">
+              {searchResults.map((result, index) => (
+                <article key={`${result.entryId}-${result.startChar}-${result.endChar}-${index}`} className="rounded-md border p-3">
+                  <p className="text-xs text-muted-foreground">Entry: {result.entryId}</p>
+                  <p className="mt-2 text-sm">{result.snippetText}</p>
+                  <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-xs text-muted-foreground">
+                      Match offsets: {result.startChar}-{result.endChar}
+                    </p>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => {
+                        const params = new URLSearchParams({
+                          start: String(result.startChar),
+                          end: String(result.endChar)
+                        });
+                        if (submittedSearchQuery) {
+                          params.set('q', submittedSearchQuery);
+                        }
+                        navigate(`/app/entries/${result.entryId}?${params.toString()}`);
+                      }}
+                    >
+                      Open highlight
+                    </Button>
+                  </div>
+                </article>
+              ))}
+            </div>
+          ) : null}
+          {hasSearchAttempt && !isSearchLoading && !searchError && searchResults.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No matches found for "{submittedSearchQuery}".</p>
+          ) : null}
+        </div>
+        <div className="mt-6 space-y-4 rounded-md border bg-background p-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
             <h2 className="text-base font-semibold">Timeline</h2>
             <span className="text-xs text-muted-foreground">
               Showing {filteredTimelineEntries.length} of {timelineEntries.length}
@@ -1098,6 +1247,9 @@ export function AppPage() {
                       </span>
                     ))}
                   </div>
+                  <p className="mt-2 rounded-md border border-cyan-200 bg-cyan-50 px-2 py-1 text-xs italic text-cyan-900">
+                    {getTimelineQuoteChipText(entry)}
+                  </p>
                   <p className="mt-2 truncate font-mono text-xs text-muted-foreground">{entry.entryId}</p>
                 </article>
               ))}

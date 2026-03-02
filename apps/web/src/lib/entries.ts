@@ -11,6 +11,7 @@ type ErrorContract = {
 export type EntryStatusResponse = {
   entryId: string;
   status: string | null;
+  title?: string | null;
 };
 
 export type TranscriptResponse = {
@@ -36,6 +37,16 @@ export type TimelineEntry = {
   entryType: string | null;
   context: string | null;
   tags: string[];
+  quote: string | null;
+};
+
+export type SearchResult = {
+  entryId: string;
+  transcriptId: string | null;
+  snippetText: string;
+  startChar: number;
+  endChar: number;
+  rank: number | null;
 };
 
 export class EntryApiError extends ApiError {
@@ -120,6 +131,16 @@ function pickString(...values: unknown[]): string | null {
   return null;
 }
 
+function pickNumber(...values: unknown[]): number | null {
+  for (const value of values) {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return value;
+    }
+  }
+
+  return null;
+}
+
 async function authorizedRequest(path: string, init: RequestInit, retry = true): Promise<Response> {
   const headers = new Headers(init.headers ?? {});
   const token = getAccessToken();
@@ -170,6 +191,15 @@ function pickEntryStatus(payload: unknown): string | null {
   }
 
   return pickString(data.status);
+}
+
+function pickEntryTitle(payload: unknown): string | null {
+  const data = asRecord(payload);
+  if (!data) {
+    return null;
+  }
+
+  return pickString(data.title, data.entry_title, data.entryTitle);
 }
 
 function pickTranscriptText(payload: unknown): string | null {
@@ -249,6 +279,30 @@ function parseTagsFromEntryPayload(payload: unknown): string[] {
   return Array.from(new Set(parsed));
 }
 
+function parseQuoteFromEntryPayload(payload: unknown): string | null {
+  const root = asRecord(payload);
+  if (!root) {
+    return null;
+  }
+
+  const quote = pickString(
+    root.quote,
+    root.quote_text,
+    root.quoteText,
+    root.snippet,
+    root.snippet_text,
+    root.snippetText,
+    root.receipt_snippet,
+    root.receiptSnippet
+  );
+  if (!quote) {
+    return null;
+  }
+
+  const normalized = quote.replace(/\s+/g, ' ').trim();
+  return normalized.length > 0 ? normalized : null;
+}
+
 function parseTimelineEntry(payload: unknown): TimelineEntry | null {
   const data = asRecord(payload);
   if (!data) {
@@ -268,7 +322,32 @@ function parseTimelineEntry(payload: unknown): TimelineEntry | null {
     occurredAt: pickString(data.occurred_at, data.occurredAt),
     entryType: pickString(data.entry_type, data.entryType, data.type),
     context: pickString(data.context),
-    tags: parseTagsFromEntryPayload(payload)
+    tags: parseTagsFromEntryPayload(payload),
+    quote: parseQuoteFromEntryPayload(payload)
+  };
+}
+
+function parseSearchResult(payload: unknown): SearchResult | null {
+  const data = asRecord(payload);
+  if (!data) {
+    return null;
+  }
+
+  const entryId = pickString(data.entry_id, data.entryId);
+  const snippetText = pickString(data.snippet_text, data.snippetText);
+  const startChar = pickNumber(data.start_char, data.startChar);
+  const endChar = pickNumber(data.end_char, data.endChar);
+  if (!entryId || !snippetText || startChar === null || endChar === null || endChar <= startChar) {
+    return null;
+  }
+
+  return {
+    entryId,
+    transcriptId: pickString(data.transcript_id, data.transcriptId),
+    snippetText,
+    startChar,
+    endChar,
+    rank: pickNumber(data.rank)
   };
 }
 
@@ -320,7 +399,8 @@ export async function createEntry(): Promise<EntryStatusResponse> {
 
   return {
     entryId,
-    status: pickEntryStatus(payload)
+    status: pickEntryStatus(payload),
+    title: pickEntryTitle(payload)
   };
 }
 
@@ -415,4 +495,25 @@ export async function fetchEntriesTimeline(): Promise<TimelineEntry[]> {
   }
 
   return Array.from(deduped.values());
+}
+
+export async function searchEntries(query: string, limit = 10): Promise<SearchResult[]> {
+  const normalizedQuery = query.trim();
+  if (!normalizedQuery) {
+    return [];
+  }
+
+  const params = new URLSearchParams({
+    q: normalizedQuery,
+    limit: String(limit)
+  });
+  const payload = await authorizedFetch(`/api/v1/search?${params.toString()}`, { method: 'GET' });
+  const root = asRecord(payload);
+  if (!root || !Array.isArray(root.results)) {
+    return [];
+  }
+
+  return root.results
+    .map((value) => parseSearchResult(value))
+    .filter((value): value is SearchResult => value !== null);
 }

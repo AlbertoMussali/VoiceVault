@@ -13,8 +13,11 @@ from app.routes.common import resolve_request_user_id
 router = APIRouter(prefix="/api/v1/search", tags=["search"])
 
 _TERM_PATTERN = re.compile(r"[A-Za-z0-9']+")
+_SENTENCE_PATTERN = re.compile(r"[^.!?\n]+[.!?]?")
 _SNIPPET_CONTEXT_CHARS = 64
 _MAX_CANDIDATES = 200
+_AUTO_QUOTE_MIN_CHARS = 24
+_AUTO_QUOTE_MAX_CHARS = 220
 
 
 def _normalize_terms(query: str) -> list[str]:
@@ -41,6 +44,29 @@ def _score_text(text: str, phrase: str, terms: list[str]) -> float:
     term_hits = sum(lowered.count(term) for term in terms)
     distinct_hits = sum(1 for term in terms if term in lowered)
     return float((phrase_hits * 100) + (distinct_hits * 10) + term_hits)
+
+
+def _select_auto_quote_offsets(text: str) -> tuple[int, int] | None:
+    cleaned = text.strip()
+    if not cleaned:
+        return None
+
+    for match in _SENTENCE_PATTERN.finditer(text):
+        raw_sentence = match.group(0)
+        sentence = raw_sentence.strip()
+        if len(sentence) < _AUTO_QUOTE_MIN_CHARS:
+            continue
+        sentence_start = match.start() + raw_sentence.find(sentence)
+        sentence_end = sentence_start + min(len(sentence), _AUTO_QUOTE_MAX_CHARS)
+        return sentence_start, sentence_end
+
+    start_char = text.find(cleaned)
+    if start_char < 0:
+        start_char = 0
+    end_char = min(len(text), start_char + _AUTO_QUOTE_MAX_CHARS)
+    if end_char <= start_char:
+        return None
+    return start_char, end_char
 
 
 def _build_snippet(text: str, start_char: int, end_char: int) -> str:
@@ -87,7 +113,9 @@ def search_entries(
     for transcript_id, entry_id, transcript_text in rows:
         offsets = _first_match_offsets(transcript_text, phrase, terms)
         if offsets is None:
-            continue
+            offsets = _select_auto_quote_offsets(transcript_text)
+            if offsets is None:
+                continue
         start_char, end_char = offsets
         score = _score_text(transcript_text, phrase, terms)
         ranked.append(

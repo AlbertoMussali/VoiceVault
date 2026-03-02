@@ -136,6 +136,28 @@ class SearchApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 401)
         self.assertEqual(response.json(), {"detail": "Unauthorized"})
 
+    def test_search_uses_auto_quote_when_query_has_no_explicit_snippet_match(self) -> None:
+        transcript_text = "Finished incident follow-up and shipped a rollback guard. Logged clear next steps."
+        entry_id, transcript_id = self._create_entry_with_current_transcript(self.user_id, transcript_text)
+
+        response = self.client.get("/api/v1/search", params={"q": "%"}, headers=self._auth_headers())
+        self.assertEqual(response.status_code, 200)
+
+        body = response.json()
+        self.assertEqual(body["query"], "%")
+        self.assertGreaterEqual(len(body["results"]), 1)
+
+        matched = next((item for item in body["results"] if item["transcript_id"] == str(transcript_id)), None)
+        self.assertIsNotNone(matched)
+        assert matched is not None
+        self.assertEqual(matched["entry_id"], str(entry_id))
+        self.assertIn("snippet_text", matched)
+        self.assertGreaterEqual(matched["start_char"], 0)
+        self.assertGreater(matched["end_char"], matched["start_char"])
+        extracted = transcript_text[matched["start_char"] : matched["end_char"]].strip()
+        self.assertGreaterEqual(len(extracted), 24)
+        self.assertIn("shipped", matched["snippet_text"].lower())
+
 
 if __name__ == "__main__":
     unittest.main()
