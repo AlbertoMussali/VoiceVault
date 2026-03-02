@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 from fastapi.requests import Request
+from sqlalchemy.orm import Session, sessionmaker
 from starlette.responses import Response
 
+from app.audit import AuditLoggingMiddleware
 from app.auth import authorize_entries_request
 from app.db import initialize_schema
 from app.routers.auth import router as auth_router
@@ -11,9 +13,10 @@ from app.routes.entries import router as entries_router
 from app.settings import get_settings
 
 
-def create_app() -> FastAPI:
+def create_app(audit_session_factory: sessionmaker[Session] | None = None) -> FastAPI:
     settings = get_settings()
     app = FastAPI(title="VoiceVault API", version=settings.api_version)
+    app.add_middleware(AuditLoggingMiddleware, audit_session_factory=audit_session_factory)
 
     @app.on_event("startup")
     def startup() -> None:

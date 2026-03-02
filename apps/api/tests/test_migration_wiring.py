@@ -22,15 +22,16 @@ class MigrationWiringTests(unittest.TestCase):
         self.assertIn("from app.settings import get_database_url", env_py)
         self.assertIn('config.set_main_option("sqlalchemy.url", get_database_url())', env_py)
 
-    def test_schema_v1_migration_exists(self) -> None:
+    def test_core_migrations_exist(self) -> None:
         versions = ROOT / "alembic" / "versions"
         migration_files = [path.name for path in versions.glob("*.py")]
         self.assertIn("20260302_0002_create_schema_v1.py", migration_files)
+        self.assertIn("20260302_0003_create_refresh_sessions.py", migration_files)
 
     def test_schema_v1_migration_creates_required_tables(self) -> None:
-        migration_py = (
-            ROOT / "alembic" / "versions" / "20260302_0002_create_schema_v1.py"
-        ).read_text(encoding="utf-8")
+        migration_py = (ROOT / "alembic" / "versions" / "20260302_0002_create_schema_v1.py").read_text(
+            encoding="utf-8"
+        )
         self.assertIn("op.create_table(", migration_py)
         for table_name in ["users", "entries", "transcripts", "audio_assets", "tags", "audit_log"]:
             self.assertIn(f'"{table_name}"', migration_py)
@@ -38,3 +39,4 @@ class MigrationWiringTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
