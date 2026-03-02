@@ -26,11 +26,17 @@ jobs:
       - name: Install backend dependencies
         run: uv pip install --system -r apps/api/requirements.txt
 
+      - name: Install backend audit tooling
+        run: uv pip install --system pip-audit
+
       - name: Lint backend (syntax/type import smoke)
         run: uv run --directory apps/api python -m compileall app tests
 
       - name: Run backend tests
         run: uv run python -m unittest discover -s apps/api/tests
+
+      - name: Scan backend dependencies
+        run: pip-audit -r apps/api/requirements.txt
 
   frontend:
     name: Frontend lint + tests

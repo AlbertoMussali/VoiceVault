@@ -1,4 +1,4 @@
-.PHONY: dev-up dev-down lint test
+.PHONY: dev-up dev-down lint test backup-create backup-restore backup-restore-dry-run
 
 dev-up:
 	@if [ -f docker-compose.yml ] || [ -f compose.yml ] || [ -f compose.yaml ]; then \
@@ -19,3 +19,20 @@ lint:
 
 test:
 	UV_CACHE_DIR=/tmp/uv-cache uv run python -m unittest discover -s apps/api/tests
+
+backup-create:
+	docker compose -f infra/docker-compose.prod.yml run --rm backup sh -lc '/backup/scripts/create_backup.sh'
+
+backup-restore:
+	@if [ -z "$$BACKUP_ARCHIVE_DIR" ]; then \
+		echo "BACKUP_ARCHIVE_DIR is required. Example: BACKUP_ARCHIVE_DIR=/var/backups/voicevault/20260302T000000Z make backup-restore"; \
+		exit 1; \
+	fi
+	docker compose -f infra/docker-compose.prod.yml run --rm -e BACKUP_ARCHIVE_DIR=$$BACKUP_ARCHIVE_DIR backup sh -lc '/backup/scripts/restore_backup.sh'
+
+backup-restore-dry-run:
+	@if [ -z "$$BACKUP_ARCHIVE_DIR" ]; then \
+		echo "BACKUP_ARCHIVE_DIR is required. Example: BACKUP_ARCHIVE_DIR=/var/backups/voicevault/20260302T000000Z make backup-restore-dry-run"; \
+		exit 1; \
+	fi
+	docker compose -f infra/docker-compose.prod.yml run --rm -e DRY_RUN=1 -e BACKUP_ARCHIVE_DIR=$$BACKUP_ARCHIVE_DIR backup sh -lc '/backup/scripts/restore_backup.sh'

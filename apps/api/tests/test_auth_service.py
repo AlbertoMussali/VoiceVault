@@ -24,7 +24,9 @@ class AuthServiceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.original_auth_secret_key = os.environ.get("AUTH_SECRET_KEY")
+        cls.original_auth_cookie_secure = os.environ.get("AUTH_COOKIE_SECURE")
         os.environ["AUTH_SECRET_KEY"] = "test-secret-key"
+        os.environ["AUTH_COOKIE_SECURE"] = "false"
         get_settings.cache_clear()
 
         cls.temp_db = tempfile.NamedTemporaryFile(suffix=".db")
@@ -53,6 +55,10 @@ class AuthServiceTests(unittest.TestCase):
             os.environ.pop("AUTH_SECRET_KEY", None)
         else:
             os.environ["AUTH_SECRET_KEY"] = cls.original_auth_secret_key
+        if cls.original_auth_cookie_secure is None:
+            os.environ.pop("AUTH_COOKIE_SECURE", None)
+        else:
+            os.environ["AUTH_COOKIE_SECURE"] = cls.original_auth_cookie_secure
         get_settings.cache_clear()
 
     def setUp(self) -> None:
@@ -85,6 +91,14 @@ class AuthServiceTests(unittest.TestCase):
             json={"email": "user@example.com", "password": "wrong-password"},
         )
         self.assertEqual(response.status_code, 401)
+
+    def test_signup_rejects_weak_password(self) -> None:
+        response = self.client.post(
+            "/api/v1/auth/signup",
+            json={"email": "weak@example.com", "password": "alllowercase12"},
+        )
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json()["detail"], "Password must include at least one uppercase letter.")
 
     def test_refresh_rotates_session(self) -> None:
         signup_response = self.client.post(
@@ -125,6 +139,44 @@ class AuthServiceTests(unittest.TestCase):
             json={"refresh_token": refresh_token},
         )
         self.assertEqual(refresh_response.status_code, 401)
+
+    def test_signup_sets_refresh_and_csrf_cookies(self) -> None:
+        response = self.client.post(
+            "/api/v1/auth/signup",
+            json={"email": "cookies@example.com", "password": "StrongPass123"},
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertIn("vv_refresh_token", response.cookies)
+        self.assertIn("vv_csrf_token", response.cookies)
+
+    def test_refresh_with_cookie_requires_csrf_header(self) -> None:
+        signup_response = self.client.post(
+            "/api/v1/auth/signup",
+            json={"email": "cookie-refresh@example.com", "password": "StrongPass123"},
+        )
+        csrf_token = signup_response.cookies.get("vv_csrf_token")
+
+        missing_csrf = self.client.post("/api/v1/auth/refresh")
+        self.assertEqual(missing_csrf.status_code, 403)
+        self.assertEqual(missing_csrf.json()["detail"], "CSRF validation failed.")
+
+        with_csrf = self.client.post("/api/v1/auth/refresh", headers={"X-CSRF-Token": csrf_token})
+        self.assertEqual(with_csrf.status_code, 200)
+        self.assertIn("refresh_token", with_csrf.json())
+
+    def test_logout_with_cookie_requires_csrf_header(self) -> None:
+        signup_response = self.client.post(
+            "/api/v1/auth/signup",
+            json={"email": "cookie-logout@example.com", "password": "StrongPass123"},
+        )
+        csrf_token = signup_response.cookies.get("vv_csrf_token")
+
+        missing_csrf = self.client.post("/api/v1/auth/logout")
+        self.assertEqual(missing_csrf.status_code, 403)
+        self.assertEqual(missing_csrf.json()["detail"], "CSRF validation failed.")
+
+        with_csrf = self.client.post("/api/v1/auth/logout", headers={"X-CSRF-Token": csrf_token})
+        self.assertEqual(with_csrf.status_code, 204)
 
 
 if __name__ == "__main__":

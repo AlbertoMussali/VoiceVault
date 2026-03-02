@@ -244,23 +244,23 @@ Notes:
 
 ## Phase 8 — Production readiness V1: observability, security, deployment, QA gates
 
-- [ ] [INF] Implement production Docker builds (multi-stage for web/api). <!-- group: 900 -->
+- [x] [INF] Implement production Docker builds (multi-stage for web/api). <!-- group: 900 -->
   - Done when: images are small, reproducible, tagged.
-- [ ] [INF] Add Nginx reverse proxy (TLS termination, compression, static assets). <!-- group: 900 -->
+- [x] [INF] Add Nginx reverse proxy (TLS termination, compression, static assets). <!-- group: 900 -->
   - Done when: single VM deploy is documented and repeatable.
-- [ ] [BE] Implement API hardening (request size limits, rate limiting, strict CORS). <!-- group: 900 -->
+- [x] [BE] Implement API hardening (request size limits, rate limiting, strict CORS). <!-- group: 900 -->
   - Done when: abuse surfaces are reduced; limits documented.
-- [ ] [BE] Implement security hardening (secure cookies, CSRF, password policy, dependency scanning). <!-- group: 900 -->
+- [x] [BE] Implement security hardening (secure cookies, CSRF, password policy, dependency scanning). <!-- group: 900 -->
   - Done when: baseline security checklist is met and automated where possible.
-- [ ] [INF] Implement backups (pg_dump schedule + blob backup) + restore runbook tested. <!-- group: 900 -->
+- [x] [INF] Implement backups (pg_dump schedule + blob backup) + restore runbook tested. <!-- group: 900 -->
   - Done when: restore procedure is executable and verified.
-- [ ] [BE] Add observability (structured JSON logs + error reporting for FE/BE). <!-- group: 900 -->
+- [x] [BE] Add observability (structured JSON logs + error reporting for FE/BE). <!-- group: 900 -->
   - Done when: operator can diagnose issues quickly.
-- [ ] [QA] Build end-to-end test suite covering full critical loop. <!-- group: 900 -->
+- [x] [QA] Build end-to-end test suite covering full critical loop. <!-- group: 900 -->
   - Done when: CI runs auth → record → transcribe → search → ask sources → brag export → delete.
-- [ ] [QA] Run load sanity for 10 concurrent users (upload/search/ask). <!-- group: 900 -->
+- [x] [QA] Run load sanity for 10 concurrent users (upload/search/ask). <!-- group: 900 -->
   - Done when: no catastrophic bottlenecks; results recorded in `docs/`.
-- [ ] [DOC] Write operator + user docs (privacy disclosure, data export, retention statements). <!-- group: 900 -->
+- [x] [DOC] Write operator + user docs (privacy disclosure, data export, retention statements). <!-- group: 900 -->
   - Done when: a new operator can deploy + run + support users from docs.
 
 ---

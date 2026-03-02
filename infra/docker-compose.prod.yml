@@ -1,0 +1,70 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-voicevault}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-voicevault}
+      POSTGRES_DB: ${POSTGRES_DB:-voicevault}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  api:
+    image: voicevault-api:${TAG:-latest}
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      AUTH_SECRET_KEY: ${AUTH_SECRET_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      REQUIRE_ZERO_RETENTION: ${REQUIRE_ZERO_RETENTION:-false}
+      PROVIDER_ZERO_RETENTION_APPROVED: ${PROVIDER_ZERO_RETENTION_APPROVED:-false}
+      STORAGE_LOCAL_ROOT: ${STORAGE_LOCAL_ROOT:-/var/lib/voicevault/storage}
+    ports:
+      - "8000:8000"
+    volumes:
+      - voicevault_storage:${STORAGE_LOCAL_ROOT:-/var/lib/voicevault/storage}
+    depends_on:
+      db:
+        condition: service_healthy
+
+  backup:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      BLOB_SOURCE_DIR: ${STORAGE_LOCAL_ROOT:-/var/lib/voicevault/storage}
+      BACKUP_ROOT_DIR: /var/backups/voicevault
+      BACKUP_INTERVAL_MINUTES: ${BACKUP_INTERVAL_MINUTES:-1440}
+    command: ["sh", "-lc", "/backup/scripts/scheduled_backup.sh"]
+    volumes:
+      - ./scripts/backup:/backup/scripts:ro
+      - voicevault_storage:${STORAGE_LOCAL_ROOT:-/var/lib/voicevault/storage}:ro
+      - backup_data:/var/backups/voicevault
+    depends_on:
+      db:
+        condition: service_healthy
+
+  web:
+    image: voicevault-web:${TAG:-latest}
+    build:
+      context: ..
+      dockerfile: apps/web/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "8080:80"
+
+volumes:
+  db_data:
+  voicevault_storage:
+  backup_data:

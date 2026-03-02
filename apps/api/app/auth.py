@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 import hashlib
+import secrets
 import uuid
 
 from argon2 import PasswordHasher
@@ -36,6 +37,20 @@ def verify_password(password: str, password_hash: str) -> bool:
         return password_hasher.verify(password_hash, password)
     except (VerifyMismatchError, VerificationError, InvalidHashError):
         return False
+
+
+def validate_password_policy(password: str, settings: Settings) -> str | None:
+    if len(password) < settings.password_min_length:
+        return f"Password must be at least {settings.password_min_length} characters long."
+    if settings.password_require_uppercase and not any(char.isupper() for char in password):
+        return "Password must include at least one uppercase letter."
+    if settings.password_require_lowercase and not any(char.islower() for char in password):
+        return "Password must include at least one lowercase letter."
+    if settings.password_require_digit and not any(char.isdigit() for char in password):
+        return "Password must include at least one number."
+    if settings.password_require_special and all(char.isalnum() for char in password):
+        return "Password must include at least one special character."
+    return None
 
 
 def hash_token(token: str) -> str:
@@ -86,6 +101,10 @@ def create_refresh_session(db: Session, user: User, settings: Settings) -> tuple
     return refresh_token, refresh_session
 
 
+def generate_csrf_token() -> str:
+    return secrets.token_urlsafe(32)
+
+
 def _unauthorized_response() -> Response:
     return JSONResponse(
         status_code=401,
@@ -130,4 +149,3 @@ def authorize_entries_request(request: Request, settings: Settings) -> Response 
         return _unauthorized_response()
 
     return None
-
