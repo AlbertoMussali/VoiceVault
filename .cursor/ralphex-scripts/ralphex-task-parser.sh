@@ -105,10 +105,21 @@ get_pending_groups() {
   _parse_tasks_stream "$workspace" | awk -F'|' '$2=="pending" {print $3}' | sort -n | uniq
 }
 
+get_groups_all() {
+  local workspace="${1:-.}"
+  _parse_tasks_stream "$workspace" | awk -F'|' '{print $3}' | sort -n | uniq
+}
+
 get_tasks_by_group() {
   local workspace="${1:-.}"
   local group="$2"
   _parse_tasks_stream "$workspace" | awk -F'|' -v g="$group" '$2=="pending" && $3==g {print}'
+}
+
+get_tasks_by_group_all() {
+  local workspace="${1:-.}"
+  local group="$2"
+  _parse_tasks_stream "$workspace" | awk -F'|' -v g="$group" '$3==g {print}'
 }
 
 get_next_task() {
@@ -183,4 +194,30 @@ get_progress() {
   total=$(_parse_tasks_stream "$workspace" | wc -l | tr -d ' ')
   done=$(_parse_tasks_stream "$workspace" | awk -F'|' '$2=="completed"' | wc -l | tr -d ' ')
   echo "$done|$total"
+}
+
+get_group_counts() {
+  local workspace="${1:-.}"
+  local group="$2"
+  local total completed pending
+
+  total=$(_parse_tasks_stream "$workspace" | awk -F'|' -v g="$group" '$3==g' | wc -l | tr -d ' ')
+  completed=$(_parse_tasks_stream "$workspace" | awk -F'|' -v g="$group" '$3==g && $2=="completed"' | wc -l | tr -d ' ')
+  pending=$(_parse_tasks_stream "$workspace" | awk -F'|' -v g="$group" '$3==g && $2=="pending"' | wc -l | tr -d ' ')
+
+  printf '{"group":"%s","total":%s,"completed":%s,"pending":%s}\n' "$group" "$total" "$completed" "$pending"
+}
+
+get_inventory_counts() {
+  local workspace="${1:-.}"
+  local total_tasks completed_tasks pending_tasks total_groups pending_groups
+
+  total_tasks=$(_parse_tasks_stream "$workspace" | wc -l | tr -d ' ')
+  completed_tasks=$(_parse_tasks_stream "$workspace" | awk -F'|' '$2=="completed"' | wc -l | tr -d ' ')
+  pending_tasks=$(_parse_tasks_stream "$workspace" | awk -F'|' '$2=="pending"' | wc -l | tr -d ' ')
+  total_groups=$(get_groups_all "$workspace" | wc -l | tr -d ' ')
+  pending_groups=$(get_pending_groups "$workspace" | wc -l | tr -d ' ')
+
+  printf '{"total_tasks":%s,"completed_tasks":%s,"pending_tasks":%s,"total_groups":%s,"pending_groups":%s}\n' \
+    "$total_tasks" "$completed_tasks" "$pending_tasks" "$total_groups" "$pending_groups"
 }

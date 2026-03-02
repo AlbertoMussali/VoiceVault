@@ -86,6 +86,9 @@ doctor() {
 
   local had_errors=0
   local had_warnings=0
+  local conflict_files=""
+  local tracked_modified=""
+  local tracked_staged=""
 
   if ! git -C "$WORKSPACE" rev-parse --git-dir >/dev/null 2>&1; then
     echo "[RED] git repo: missing"
@@ -98,7 +101,9 @@ doctor() {
   echo "[OK] base branch: $base"
 
   if [[ -n "$(git -C "$WORKSPACE" ls-files -u 2>/dev/null)" ]]; then
+    conflict_files="$(git -C "$WORKSPACE" ls-files -u 2>/dev/null | awk '{print $4}' | sort -u)"
     echo "[RED] merge conflicts present"
+    echo "$conflict_files" | sed -n '1,20p' | sed 's/^/  - /'
     had_errors=1
   else
     echo "[OK] no merge conflicts"
@@ -138,7 +143,17 @@ doctor() {
 
   # Parallel-mode cleanliness: tracked changes must be clean.
   if ! git -C "$WORKSPACE" diff --quiet || ! git -C "$WORKSPACE" diff --cached --quiet; then
+    tracked_modified="$(git -C "$WORKSPACE" diff --name-only 2>/dev/null || true)"
+    tracked_staged="$(git -C "$WORKSPACE" diff --cached --name-only 2>/dev/null || true)"
     echo "[WARN] tracked changes present (parallel runs will refuse to start)"
+    if [[ -n "${tracked_modified//[[:space:]]/}" ]]; then
+      echo "  modified:"
+      echo "$tracked_modified" | sed -n '1,20p' | sed 's/^/    - /'
+    fi
+    if [[ -n "${tracked_staged//[[:space:]]/}" ]]; then
+      echo "  staged:"
+      echo "$tracked_staged" | sed -n '1,20p' | sed 's/^/    - /'
+    fi
     had_warnings=1
   else
     echo "[OK] tracked tree clean"
@@ -189,8 +204,10 @@ doctor() {
   if [[ "$had_errors" -eq 1 ]]; then
     return 2
   fi
+  # Warnings are non-fatal; keep exit code 0 so users can chain
+  # `./ralphex doctor && ./ralphex run ...` without surprising short-circuit.
   if [[ "$had_warnings" -eq 1 ]]; then
-    return 1
+    return 0
   fi
   return 0
 }
@@ -233,6 +250,12 @@ status_cmd() {
       merged: count("MERGED"),
       merge_failed: count("MERGE_FAILED"),
       fixed: count("MERGE_FIX_DONE"),
+      groups_started: count("GROUP_STARTED"),
+      groups_completed: count("GROUP_COMPLETED"),
+      groups_failed: count("GROUP_FAILED"),
+      orch_started: count("ORCH_STARTED"),
+      orch_commit_ok: count("ORCH_MAIN_COMMIT_OK"),
+      orch_commit_failed: count("ORCH_MAIN_COMMIT_FAILED"),
       run_started: count("RUN_STARTED"),
       run_done: count("RUN_DONE"),
       finalize_ok: count("FINALIZE_MAIN_OK"),
@@ -241,9 +264,20 @@ status_cmd() {
   ' "$jobs"
 
   echo ""
+  echo "Group status:"
+  jq -s '
+    map(select(.group? != null and (.status=="GROUP_STARTED" or .status=="GROUP_COMPLETED" or .status=="GROUP_FAILED" or .status=="ORCH_MAIN_COMMIT_OK" or .status=="ORCH_MAIN_COMMIT_FAILED")))
+    | group_by(.group)
+    | map({group: .[0].group, last: .[-1].status})
+    | sort_by(.group)
+    | .[]
+    | "group=\(.group) status=\(.last)"
+  ' "$jobs" | sed -n '1,40p'
+
+  echo ""
   echo "Recent failures:"
   jq -r '
-    select(.status=="JOB_FAILED" or .status=="MERGE_FAILED" or .status=="FINALIZE_MAIN_FAILED")
+    select(.status=="JOB_FAILED" or .status=="MERGE_FAILED" or .status=="FINALIZE_MAIN_FAILED" or .status=="GROUP_FAILED" or .status=="ORCH_MAIN_COMMIT_FAILED")
     | "\(.ts) \(.status) task=\(.task_id // "-") branch=\(.branch // "-") reason=\(.reason // "-")"
   ' "$jobs" | tail -n 8
 

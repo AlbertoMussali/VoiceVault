@@ -5,7 +5,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/ralphex-common.sh"
+source "$SCRIPT_DIR/ralphex-ui.sh"
 source "$SCRIPT_DIR/ralphex-parallel.sh"
+source "$SCRIPT_DIR/ralphex-orchestrator.sh"
 
 PARALLEL_MODE=false
 MAX_PARALLEL=3
@@ -79,11 +81,9 @@ if ! check_prerequisites "$WORKSPACE"; then
 fi
 
 init_ralphex_dir "$WORKSPACE"
-show_task_summary "$WORKSPACE"
-
-echo "Model: $MODEL"
-echo "Sandbox: $SANDBOX"
-echo "Max iterations: $MAX_ITERATIONS"
+if ! ui_run_doctor_or_exit "$WORKSPACE"; then
+  exit 2
+fi
 
 if git -C "$WORKSPACE" show-ref --verify --quiet refs/heads/main; then
   BASE_BRANCH="main"
@@ -92,6 +92,17 @@ elif git -C "$WORKSPACE" show-ref --verify --quiet refs/heads/master; then
 else
   BASE_BRANCH="$(git -C "$WORKSPACE" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
 fi
+
+run_header_id="${RESUME_RUN_ID:-$(date '+%Y%m%d%H%M%S')}"
+run_mode="sequential"
+if [[ "$PARALLEL_MODE" == true && -n "$RESUME_RUN_ID" ]]; then
+  run_mode="parallel-resume"
+elif [[ "$PARALLEL_MODE" == true ]]; then
+  run_mode="parallel"
+fi
+ui_print_run_header "$WORKSPACE" "$run_header_id" "$BASE_BRANCH" "$run_mode" "$MODEL" "$SANDBOX"
+ui_print_task_inventory "$WORKSPACE"
+_ui_prefix "Plan" "Max iterations: $MAX_ITERATIONS | Max parallel: $MAX_PARALLEL"
 
 acquire_lock() {
   local workspace="$1"
@@ -148,6 +159,7 @@ if [[ "$preflight_rc" -ne 0 ]]; then
   echo "$preflight_out" | tail -n 25 >&2
   exit 2
 fi
+_ui_prefix "Doctor" "Model preflight passed."
 
 if [[ -n "$USE_BRANCH" ]]; then
   git -C "$WORKSPACE" checkout -B "$USE_BRANCH"
@@ -172,15 +184,6 @@ if [[ "$PARALLEL_MODE" == true ]]; then
     acquire_lock "$WORKSPACE" "$RESUME_RUN_ID" "parallel-resume" || exit 3
     resume_parallel_run "$WORKSPACE" "$RESUME_RUN_ID"
     rc=$?
-    if [[ "$rc" -eq 0 ]]; then
-      # Best-effort finalize: fast-forward main to integration branch recorded in run meta.
-      meta="$WORKSPACE/.ralphex/parallel/$RESUME_RUN_ID/run.meta"
-      integration_branch=$(awk -F= '$1=="integration_branch"{print $2}' "$meta" 2>/dev/null || true)
-      if [[ -n "$integration_branch" ]]; then
-        git -C "$WORKSPACE" checkout "$BASE_BRANCH" >/dev/null 2>&1 || true
-        git -C "$WORKSPACE" merge --ff-only "$integration_branch" || true
-      fi
-    fi
     exit "$rc"
   fi
 
@@ -205,39 +208,19 @@ if [[ "$PARALLEL_MODE" == true ]]; then
   fi
 
   run_id=$(date '+%Y%m%d%H%M%S')
-  integration_branch="${USE_BRANCH:-ralphex/integration-$run_id}"
   acquire_lock "$WORKSPACE" "$run_id" "parallel" || exit 3
 
-  run_parallel_tasks "$WORKSPACE" "$MAX_PARALLEL" "$integration_branch" "$MAX_ITERATIONS" "$run_id" "$BASE_BRANCH"
+  run_parallel_tasks "$WORKSPACE" "$MAX_PARALLEL" "${USE_BRANCH:-}" "$MAX_ITERATIONS" "$run_id" "$BASE_BRANCH"
   rc=$?
   if [[ "$rc" -eq 0 ]]; then
-    # Ensure everything ends up on main via ff-only.
-    git -C "$WORKSPACE" checkout "$BASE_BRANCH" >/dev/null 2>&1 || true
-    if ! git -C "$WORKSPACE" merge --ff-only "$integration_branch"; then
-      echo "Failed to fast-forward main to $integration_branch." >&2
-      echo "Inspect with: git log $BASE_BRANCH..$integration_branch --oneline" >&2
-      jobs_file="$WORKSPACE/.ralphex/parallel/$run_id/jobs.jsonl"
-      if [[ -f "$jobs_file" ]]; then
-        jq -nc --arg run_id "$run_id" --arg status "FINALIZE_MAIN_FAILED" --arg branch "$BASE_BRANCH" --arg integration "$integration_branch" '{ts:now|todateiso8601, run_id:$run_id, status:$status, base_branch:$branch, integration_branch:$integration}' >>"$jobs_file" || true
-      fi
-      exit 5
-    fi
-    jobs_file="$WORKSPACE/.ralphex/parallel/$run_id/jobs.jsonl"
-    if [[ -f "$jobs_file" ]]; then
-      jq -nc --arg run_id "$run_id" --arg status "FINALIZE_MAIN_OK" --arg branch "$BASE_BRANCH" --arg integration "$integration_branch" '{ts:now|todateiso8601, run_id:$run_id, status:$status, base_branch:$branch, integration_branch:$integration}' >>"$jobs_file" || true
-    fi
-    cleanup_parallel_run "$WORKSPACE" "$run_id" "$integration_branch" || true
+    cleanup_parallel_run "$WORKSPACE" "$run_id" "${USE_BRANCH:-}" || true
   else
-    echo "Parallel run failed. Integration branch preserved: $integration_branch" >&2
-    echo "Resume later with: ./ralphex-loop.sh --parallel --resume-run $run_id -y" >&2
-    jobs_file="$WORKSPACE/.ralphex/parallel/$run_id/jobs.jsonl"
-    if [[ -f "$jobs_file" ]]; then
-      jq -nc --arg run_id "$run_id" --arg status "FINALIZE_MAIN_FAILED" --arg branch "$BASE_BRANCH" --arg integration "$integration_branch" '{ts:now|todateiso8601, run_id:$run_id, status:$status, base_branch:$branch, integration_branch:$integration}' >>"$jobs_file" || true
-    fi
+    echo "Parallel run failed at group barrier orchestrator. Resume with: ./ralphex-loop.sh --parallel --resume-run $run_id -y" >&2
   fi
 else
-  acquire_lock "$WORKSPACE" "serial-$$" "serial" || exit 3
-  run_ralphex_loop "$WORKSPACE" "$SCRIPT_DIR"
+  run_id=$(date '+%Y%m%d%H%M%S')
+  acquire_lock "$WORKSPACE" "$run_id" "sequential-grouped" || exit 3
+  run_parallel_tasks "$WORKSPACE" "1" "" "$MAX_ITERATIONS" "$run_id" "$BASE_BRANCH"
   rc=$?
 fi
 

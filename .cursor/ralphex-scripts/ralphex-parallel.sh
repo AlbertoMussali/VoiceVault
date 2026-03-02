@@ -5,6 +5,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/ralphex-common.sh"
+source "$SCRIPT_DIR/ralphex-ui.sh"
+source "$SCRIPT_DIR/ralphex-orchestrator.sh"
 
 # When sourced from ralphex-common.sh these may already be set; keep defensive defaults.
 MODEL="${MODEL:-${RALPHEX_MODEL:-$DEFAULT_MODEL}}"
@@ -48,16 +50,13 @@ _create_integration_worktree() {
   status_dir="$(ralphex_state_dir "$workspace")/parallel/$run_id"
   local merge_log="$status_dir/merge.log"
   local integration_dir
-  integration_dir="$(ralphex_state_dir "$workspace")/integration/$run_id"
+  if [[ "$integration_branch" =~ -g([0-9]+)$ ]]; then
+    integration_dir="$(ralphex_state_dir "$workspace")/integration/$run_id/g${BASH_REMATCH[1]}"
+  else
+    integration_dir="$(ralphex_state_dir "$workspace")/integration/$run_id"
+  fi
 
   mkdir -p "$status_dir" "$(dirname "$integration_dir")"
-  {
-    echo "run_id=$run_id"
-    echo "integration_branch=$integration_branch"
-    echo "base_ref=$base_ref"
-    echo "created_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-    echo "runner_version=$(git -C "$workspace" rev-parse --short HEAD 2>/dev/null || echo unknown)"
-  } >"$status_dir/run.meta"
 
   if [[ -d "$integration_dir" ]]; then
     echo "$integration_dir"
@@ -353,37 +352,62 @@ resume_parallel_run() {
 
   [[ -f "$meta" ]] || { echo "No run meta found for run_id=$run_id" >&2; return 1; }
 
-  local integration_branch
-  integration_branch=$(awk -F= '$1=="integration_branch"{print $2}' "$meta")
-  [[ -n "$integration_branch" ]] || { echo "Missing integration_branch in $meta" >&2; return 1; }
+  local base_ref
+  base_ref=$(awk -F= '$1=="base_ref"{print $2}' "$meta")
+  [[ -n "$base_ref" ]] || base_ref="main"
 
-  local integration_dir
-  integration_dir="$(_create_integration_worktree "$workspace" "$run_id" "$integration_branch" "$integration_branch")"
+  local groups
+  groups=$(get_pending_groups "$workspace" || true)
 
-  echo "Resuming Ralphex parallel run: $run_id (integration=$integration_branch)"
+  _ui_prefix "Plan" "Resuming run $run_id with group-barrier orchestrator"
   _run_log_json "$jobs_file" --arg run_id "$run_id" --arg status "RESUME_STARTED" '{ts:now|todateiso8601, run_id:$run_id, status:$status}'
 
-  local status_file
-  for status_file in "$status_dir"/job-*.status; do
-    [[ -f "$status_file" ]] || continue
-    local outcome task_id branch wt_dir reason sha tools test_cmd
-    IFS='|' read -r outcome task_id branch wt_dir reason sha tools test_cmd < "$status_file"
-    if [[ "$outcome" != "SUCCESS" ]]; then
+  local group
+  while IFS= read -r group || [[ -n "$group" ]]; do
+    [[ -z "$group" ]] && continue
+
+    if jq -e --arg g "$group" 'select(.group==$g and .status=="GROUP_COMPLETED")' "$jobs_file" >/dev/null 2>&1; then
+      _ui_prefix "Group $group" "Skipping: already completed in prior run stage"
       continue
     fi
 
-    if _merge_success_branch "$integration_dir" "$branch" "$merge_log"; then
-      _mark_task_complete_in_integration "$integration_dir" "$task_id" "$merge_log"
-      _run_log_json "$jobs_file" --arg run_id "$run_id" --arg task_id "$task_id" --arg branch "$branch" --arg status "MERGED" '{ts:now|todateiso8601, run_id:$run_id, task_id:$task_id, branch:$branch, status:$status}'
-    else
-      echo "Merge failed for $branch" >>"$status_dir/merge_failures.log"
-      if ! _auto_resolve_merge_conflict "$workspace" "$run_id" "$integration_branch" "$task_id" "$branch"; then
-        echo "Auto-resolve failed for $branch" >>"$status_dir/merge_failures.log"
-        return 1
+    local group_mode group_counts
+    group_mode=$(ui_detect_group_mode "$workspace" "$group" "3")
+    group_counts=$(ui_print_group_plan "$workspace" "$group" "0" | tail -n 1)
+    ui_print_group_start "$group" "$group_mode" "$group_counts"
+    record_orchestrator_event "$jobs_file" "$run_id" "$group" "GROUP_STARTED"
+
+    local integration_pair
+    integration_pair=$(create_group_integration_worktree "$workspace" "$run_id" "$group" "$base_ref" "$status_dir")
+    local integration_branch integration_dir
+    integration_branch=$(echo "$integration_pair" | cut -d'|' -f1)
+    integration_dir=$(echo "$integration_pair" | cut -d'|' -f2)
+
+    local success_lines
+    success_lines=$(collect_group_success_branches "$workspace" "$run_id" "$group" "$status_dir" || true)
+    while IFS='|' read -r task_id branch _wt_dir _sha || [[ -n "$task_id" ]]; do
+      [[ -z "$task_id" ]] && continue
+      if ! _merge_success_branch "$integration_dir" "$branch" "$status_dir/merge.log"; then
+        if ! _auto_resolve_merge_conflict "$workspace" "$run_id" "$integration_branch" "$task_id" "$branch"; then
+          ui_print_group_task_result "$task_id" "failed" "resume_merge_failed"
+          record_orchestrator_event "$jobs_file" "$run_id" "$group" "GROUP_FAILED" '{"reason":"resume_merge_failed"}'
+          return 1
+        fi
+        integration_dir="$(_create_integration_worktree "$workspace" "$run_id" "$integration_branch" "$integration_branch")"
       fi
-      _mark_task_complete_in_integration "$integration_dir" "$task_id" "$merge_log"
+      ui_print_group_task_result "$task_id" "merged"
+      _mark_task_complete_in_integration "$integration_dir" "$task_id" "$status_dir/merge.log"
+    done <<<"$success_lines"
+
+    record_orchestrator_event "$jobs_file" "$run_id" "$group" "GROUP_TASKS_DONE"
+    if ! orchestrate_group_parallel "$workspace" "$run_id" "$group" "$base_ref" "$integration_branch" "$status_dir"; then
+      _ui_prefix "Group $group" "Stopped: orchestrator failed (fail-closed)"
+      record_orchestrator_event "$jobs_file" "$run_id" "$group" "GROUP_FAILED" '{"reason":"orchestrator_failed"}'
+      return 1
     fi
-  done
+    ui_print_group_done "$group" '{"merged":0,"failed":0,"blocked":0}'
+    record_orchestrator_event "$jobs_file" "$run_id" "$group" "GROUP_COMPLETED"
+  done <<<"$groups"
 
   _run_log_json "$jobs_file" --arg run_id "$run_id" --arg status "RESUME_DONE" '{ts:now|todateiso8601, run_id:$run_id, status:$status}'
   return 0
@@ -395,63 +419,48 @@ repair_parallel_run() {
 
   local status_dir
   status_dir="$(ralphex_state_dir "$workspace")/parallel/$run_id"
-  local merge_log="$status_dir/merge.log"
   local jobs_file="$status_dir/jobs.jsonl"
   local meta="$status_dir/run.meta"
 
   [[ -f "$meta" ]] || { echo "No run meta found for run_id=$run_id" >&2; return 1; }
 
-  local integration_branch
-  integration_branch=$(awk -F= '$1=="integration_branch"{print $2}' "$meta")
-  [[ -n "$integration_branch" ]] || { echo "Missing integration_branch in $meta" >&2; return 1; }
+  local base_ref
+  base_ref=$(awk -F= '$1=="base_ref"{print $2}' "$meta")
+  [[ -n "$base_ref" ]] || base_ref="main"
 
-  local integration_dir
-  integration_dir="$(_create_integration_worktree "$workspace" "$run_id" "$integration_branch" "$integration_branch")"
-
-  echo "Repairing run: $run_id (integration=$integration_branch)"
+  _ui_prefix "Plan" "Repairing run $run_id from first incomplete group barrier"
   _run_log_json "$jobs_file" --arg run_id "$run_id" --arg status "REPAIR_STARTED" '{ts:now|todateiso8601, run_id:$run_id, status:$status}'
 
-  local branches
-  branches=$(git -C "$workspace" for-each-ref --format='%(refname:short)' "refs/heads/ralphex/parallel-${run_id}-*" 2>/dev/null || true)
-  if [[ -z "$branches" ]]; then
-    echo "No parallel branches found for run_id=$run_id"
-    return 0
-  fi
-
-  local branch
-  local failed=0
-  while IFS= read -r branch || [[ -n "$branch" ]]; do
-    [[ -z "$branch" ]] && continue
-    local task_id=""
-    if [[ "$branch" =~ (line_[0-9]+) ]]; then
-      task_id="${BASH_REMATCH[1]}"
-    fi
-
-    if _merge_success_branch "$integration_dir" "$branch" "$merge_log"; then
-      [[ -n "$task_id" ]] && _mark_task_complete_in_integration "$integration_dir" "$task_id" "$merge_log"
-      _run_log_json "$jobs_file" --arg run_id "$run_id" --arg task_id "${task_id:-}" --arg branch "$branch" --arg status "MERGED" '{ts:now|todateiso8601, run_id:$run_id, task_id:$task_id, branch:$branch, status:$status}'
-      git -C "$workspace" branch -D "$branch" >/dev/null 2>&1 || true
+  local groups
+  groups=$(get_pending_groups "$workspace" || true)
+  local group
+  while IFS= read -r group || [[ -n "$group" ]]; do
+    [[ -z "$group" ]] && continue
+    if jq -e --arg g "$group" 'select(.group==$g and .status=="GROUP_COMPLETED")' "$jobs_file" >/dev/null 2>&1; then
+      _ui_prefix "Group $group" "Skipping: already completed"
       continue
     fi
 
-    echo "Repair merge failed for $branch" >>"$status_dir/merge_failures.log"
-    _run_log_json "$jobs_file" --arg run_id "$run_id" --arg task_id "${task_id:-}" --arg branch "$branch" --arg status "MERGE_FAILED" '{ts:now|todateiso8601, run_id:$run_id, task_id:$task_id, branch:$branch, status:$status}'
+    local group_mode group_counts
+    group_mode=$(ui_detect_group_mode "$workspace" "$group" "3")
+    group_counts=$(ui_print_group_plan "$workspace" "$group" "0" | tail -n 1)
+    ui_print_group_start "$group" "$group_mode" "$group_counts"
 
-    if _auto_resolve_merge_conflict "$workspace" "$run_id" "$integration_branch" "${task_id:-unknown}" "$branch"; then
-      integration_dir="$(_create_integration_worktree "$workspace" "$run_id" "$integration_branch" "$integration_branch")"
-      [[ -n "$task_id" ]] && _mark_task_complete_in_integration "$integration_dir" "$task_id" "$merge_log"
-      _run_log_json "$jobs_file" --arg run_id "$run_id" --arg task_id "${task_id:-}" --arg branch "$branch" --arg status "MERGED" '{ts:now|todateiso8601, run_id:$run_id, task_id:$task_id, branch:$branch, status:$status}'
-      git -C "$workspace" branch -D "$branch" >/dev/null 2>&1 || true
+    local integration_pair
+    integration_pair=$(create_group_integration_worktree "$workspace" "$run_id" "$group" "$base_ref" "$status_dir")
+    local integration_branch
+    integration_branch=$(echo "$integration_pair" | cut -d'|' -f1)
+
+    if orchestrate_group_parallel "$workspace" "$run_id" "$group" "$base_ref" "$integration_branch" "$status_dir"; then
+      ui_print_group_done "$group" '{"merged":0,"failed":0,"blocked":0}'
+      record_orchestrator_event "$jobs_file" "$run_id" "$group" "GROUP_COMPLETED"
     else
-      failed=$((failed + 1))
-      echo "Repair auto-resolve failed for $branch" >>"$status_dir/merge_failures.log"
+      _ui_prefix "Group $group" "Stopped: repair orchestrator failed"
+      record_orchestrator_event "$jobs_file" "$run_id" "$group" "GROUP_FAILED" '{"reason":"repair_orchestrator_failed"}'
+      _run_log_json "$jobs_file" --arg run_id "$run_id" --arg status "REPAIR_FAILED" '{ts:now|todateiso8601, run_id:$run_id, status:$status}'
+      return 1
     fi
-  done <<<"$branches"
-
-  if [[ "$failed" -gt 0 ]]; then
-    _run_log_json "$jobs_file" --arg run_id "$run_id" --arg status "REPAIR_FAILED" --arg failed "$failed" '{ts:now|todateiso8601, run_id:$run_id, status:$status, failed:($failed|tonumber)}'
-    return 1
-  fi
+  done <<<"$groups"
 
   _run_log_json "$jobs_file" --arg run_id "$run_id" --arg status "REPAIR_DONE" '{ts:now|todateiso8601, run_id:$run_id, status:$status}'
   return 0
@@ -460,7 +469,7 @@ repair_parallel_run() {
 run_parallel_tasks() {
   local workspace="$1"
   local max_parallel="${2:-3}"
-  local integration_branch="${3:-}"
+  local integration_branch_unused="${3:-}"
   local max_tasks="${4:-0}"
   local run_id="${5:-}"
   local base_ref="${6:-main}"
@@ -471,7 +480,6 @@ run_parallel_tasks() {
   fi
 
   [[ -n "$run_id" ]] || run_id=$(date '+%Y%m%d%H%M%S')
-  [[ -n "$integration_branch" ]] || integration_branch="ralphex/integration-$run_id"
 
   local status_dir
   status_dir="$(ralphex_state_dir "$workspace")/parallel/$run_id"
@@ -479,29 +487,51 @@ run_parallel_tasks() {
   local jobs_file="$status_dir/jobs.jsonl"
   mkdir -p "$status_dir"
 
+  {
+    echo "run_id=$run_id"
+    echo "base_ref=$base_ref"
+    echo "orchestrator_mode=group-barrier"
+    echo "commit_style=group-checkpoint"
+    echo "failure_mode=fail-closed"
+    echo "created_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    echo "runner_version=$(git -C "$workspace" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  } >"$status_dir/run.meta"
+
   init_ralphex_dir "$workspace"
-  log_activity "$workspace" "parallel run start: run_id=$run_id integration=$integration_branch base=$base_ref"
+  log_activity "$workspace" "parallel run start: run_id=$run_id base=$base_ref orchestrator=group-barrier"
 
-  echo "Ralphex parallel run: $run_id"
-
-  local integration_dir
-  integration_dir="$(_create_integration_worktree "$workspace" "$run_id" "$integration_branch" "$base_ref")"
+  local execution_mode="parallel"
+  [[ "$max_parallel" -le 1 ]] && execution_mode="sequential"
+  _ui_prefix "Plan" "Execution mode selected: $execution_mode"
+  _ui_prefix "Plan" "Run stream started (run_id=$run_id)"
 
   local groups
-  groups=$(get_pending_groups "$integration_dir" || true)
+  groups=$(get_pending_groups "$workspace" || true)
   if [[ -z "$groups" ]]; then
-    echo "No pending tasks."
+    _ui_prefix "Summary" "No pending tasks. Nothing to execute."
     return 0
   fi
 
-  _run_log_json "$jobs_file" --arg run_id "$run_id" --arg integration_branch "$integration_branch" --arg base_ref "$base_ref" --arg status "RUN_STARTED" '{ts:now|todateiso8601, run_id:$run_id, integration_branch:$integration_branch, base_ref:$base_ref, status:$status}'
+  _run_log_json "$jobs_file" --arg run_id "$run_id" --arg base_ref "$base_ref" --arg status "RUN_STARTED" '{ts:now|todateiso8601, run_id:$run_id, base_ref:$base_ref, status:$status}'
 
   local merged_count=0
   local failed_count=0
+  local blocked_count=0
   local launched_tasks=0
   local stop=0
   local job_global=0
   local fatal=0
+  local groups_completed=0
+  local groups_failed=0
+  local orchestrator_attempted=0
+  local orchestrator_succeeded=0
+  local orchestrator_failed=0
+
+  local inventory_json
+  inventory_json=$(get_inventory_counts "$workspace")
+  local tasks_skipped_initial groups_skipped_initial
+  tasks_skipped_initial=$(echo "$inventory_json" | jq -r '.completed_tasks')
+  groups_skipped_initial=$(( $(echo "$inventory_json" | jq -r '.total_groups') - $(echo "$inventory_json" | jq -r '.pending_groups') ))
 
   _required_tools_missing() {
     local csv="${1:-}"
@@ -545,9 +575,22 @@ run_parallel_tasks() {
     fi
     [[ -z "$group" ]] && continue
 
-    echo "Processing group $group"
+    local group_mode group_counts
+    group_mode=$(ui_detect_group_mode "$workspace" "$group" "$max_parallel")
+    group_counts=$(ui_print_group_plan "$workspace" "$group" "0" | tail -n 1)
+    ui_print_group_start "$group" "$group_mode" "$group_counts"
+    record_orchestrator_event "$jobs_file" "$run_id" "$group" "GROUP_STARTED"
+
+    local integration_pair
+    integration_pair=$(create_group_integration_worktree "$workspace" "$run_id" "$group" "$base_ref" "$status_dir")
+    local integration_branch integration_dir
+    integration_branch=$(echo "$integration_pair" | cut -d'|' -f1)
+    integration_dir=$(echo "$integration_pair" | cut -d'|' -f2)
+
     local blocked_file="$status_dir/blocked_tasks.txt"
     touch "$blocked_file"
+    local merged_in_group=0
+    local blocked_in_group=0
 
     while true; do
       if [[ "$fatal" -eq 1 || "$stop" -eq 1 ]]; then
@@ -580,6 +623,9 @@ run_parallel_tasks() {
           _run_log_json "$jobs_file" --arg run_id "$run_id" --arg task_id "$task_id" --arg status "JOB_FAILED" --arg reason "missing_tool:$missing" '{ts:now|todateiso8601, run_id:$run_id, task_id:$task_id, status:$status, reason:$reason}'
           log_error "$workspace" "Task $task_id blocked (missing tool): $missing"
           log_progress "$workspace" "Blocked $task_id in group $group: missing_tool:$missing"
+          blocked_count=$((blocked_count + 1))
+          blocked_in_group=$((blocked_in_group + 1))
+          ui_print_group_task_result "$task_id" "blocked" "missing_tool:$missing"
           continue
         fi
 
@@ -639,7 +685,9 @@ run_parallel_tasks() {
             _mark_task_complete_in_integration "$integration_dir" "$task_id" "$merge_log"
             _run_log_json "$jobs_file" --arg run_id "$run_id" --arg task_id "$task_id" --arg branch "$branch" --arg status "MERGED" '{ts:now|todateiso8601, run_id:$run_id, task_id:$task_id, branch:$branch, status:$status}'
             merged_count=$((merged_count + 1))
+            merged_in_group=$((merged_in_group + 1))
             log_progress "$workspace" "Merged $task_id into $integration_branch (group $group)."
+            ui_print_group_task_result "$task_id" "merged"
           else
             echo "Merge failed for $branch" >>"$status_dir/merge_failures.log"
             _run_log_json "$jobs_file" --arg run_id "$run_id" --arg task_id "$task_id" --arg branch "$branch" --arg status "MERGE_FAILED" '{ts:now|todateiso8601, run_id:$run_id, task_id:$task_id, branch:$branch, status:$status}'
@@ -648,34 +696,94 @@ run_parallel_tasks() {
               _mark_task_complete_in_integration "$integration_dir" "$task_id" "$merge_log"
               _run_log_json "$jobs_file" --arg run_id "$run_id" --arg task_id "$task_id" --arg branch "$branch" --arg status "MERGED" '{ts:now|todateiso8601, run_id:$run_id, task_id:$task_id, branch:$branch, status:$status}'
               merged_count=$((merged_count + 1))
+              merged_in_group=$((merged_in_group + 1))
               log_progress "$workspace" "Auto-resolved merge and merged $task_id into $integration_branch."
+              ui_print_group_task_result "$task_id" "merged" "after-merge-fix"
             else
               failed_count=$((failed_count + 1))
               fatal=1
               stop=1
               log_error "$workspace" "Fatal: unresolvable merge for $task_id ($branch)."
               log_progress "$workspace" "Stopped due to unresolvable merge for $task_id ($branch). See $status_dir/merge.log."
+              ui_print_group_task_result "$task_id" "failed" "unresolvable_merge"
             fi
           fi
         else
           echo "$task_id failed: $reason" >>"$status_dir/failures.log"
           _run_log_json "$jobs_file" --arg run_id "$run_id" --arg task_id "$task_id" --arg branch "$branch" --arg status "JOB_FAILED" --arg reason "$reason" '{ts:now|todateiso8601, run_id:$run_id, task_id:$task_id, branch:$branch, status:$status, reason:$reason}'
           failed_count=$((failed_count + 1))
+          ui_print_group_task_result "$task_id" "failed" "$reason"
         fi
 
         _cleanup_worktree "$workspace" "$wt_dir"
-        git -C "$workspace" branch -D "$branch" >/dev/null 2>&1 || true
       done
     done
 
     if [[ "$fatal" -eq 1 ]]; then
+      groups_failed=$((groups_failed + 1))
+      record_orchestrator_event "$jobs_file" "$run_id" "$group" "GROUP_FAILED" '{"reason":"group_task_merge_failed"}'
+      _ui_prefix "Group $group" "Stopped: fatal task merge failure before orchestrator."
       break
     fi
+
+    record_orchestrator_event "$jobs_file" "$run_id" "$group" "GROUP_TASKS_DONE" "{\"merged\":$merged_in_group}"
+    orchestrator_attempted=$((orchestrator_attempted + 1))
+    if ! orchestrate_group_parallel "$workspace" "$run_id" "$group" "$base_ref" "$integration_branch" "$status_dir"; then
+      failed_count=$((failed_count + 1))
+      fatal=1
+      stop=1
+      groups_failed=$((groups_failed + 1))
+      orchestrator_failed=$((orchestrator_failed + 1))
+      record_orchestrator_event "$jobs_file" "$run_id" "$group" "GROUP_FAILED" '{"reason":"orchestrator_failed"}'
+      log_error "$workspace" "Fatal: orchestrator failed for group $group."
+      log_progress "$workspace" "Stopped due to orchestrator failure for group $group."
+      _ui_prefix "Group $group" "Stopped: orchestrator failed (fail-closed)."
+      break
+    fi
+    orchestrator_succeeded=$((orchestrator_succeeded + 1))
+    groups_completed=$((groups_completed + 1))
+    ui_print_group_done "$group" "{\"merged\":$merged_in_group,\"failed\":0,\"blocked\":$blocked_in_group}"
+    record_orchestrator_event "$jobs_file" "$run_id" "$group" "GROUP_COMPLETED"
   done <<< "$groups"
 
-  echo "Parallel summary: launched=$launched_tasks merged=$merged_count failed=$failed_count"
+  _ui_prefix "Summary" "Execution summary: launched=$launched_tasks merged=$merged_count failed=$failed_count blocked=$blocked_count"
   log_activity "$workspace" "parallel run end: run_id=$run_id merged=$merged_count failed=$failed_count"
   _run_log_json "$jobs_file" --arg run_id "$run_id" --arg status "RUN_DONE" --arg merged "$merged_count" --arg failed "$failed_count" '{ts:now|todateiso8601, run_id:$run_id, status:$status, merged:($merged|tonumber), failed:($failed|tonumber)}'
+
+  local head_sha head_branch main_clean next_action
+  head_sha=$(git -C "$workspace" rev-parse --short HEAD 2>/dev/null || echo "unknown")
+  head_branch=$(git -C "$workspace" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+  if git -C "$workspace" diff --quiet && git -C "$workspace" diff --cached --quiet; then
+    main_clean="true"
+  else
+    main_clean="false"
+  fi
+  if [[ "$failed_count" -gt 0 ]]; then
+    next_action="./ralphex resume --run-id $run_id -y (or ./ralphex repair --run-id $run_id)"
+  else
+    next_action="run complete"
+  fi
+
+  local aggregate_json
+  aggregate_json=$(jq -nc \
+    --argjson g_completed "$groups_completed" \
+    --argjson g_failed "$groups_failed" \
+    --argjson g_skipped "$groups_skipped_initial" \
+    --argjson t_executed "$launched_tasks" \
+    --argjson t_merged "$merged_count" \
+    --argjson t_skipped "$tasks_skipped_initial" \
+    --argjson t_blocked "$blocked_count" \
+    --argjson t_failed "$failed_count" \
+    --argjson o_attempted "$orchestrator_attempted" \
+    --argjson o_succeeded "$orchestrator_succeeded" \
+    --argjson o_failed "$orchestrator_failed" \
+    --argjson o_cleanup_ok "$orchestrator_succeeded" \
+    --arg head_sha "$head_sha" \
+    --arg head_branch "$head_branch" \
+    --arg main_clean "$main_clean" \
+    --arg next_action "$next_action" \
+    '{groups:{completed:$g_completed,failed:$g_failed,skipped:$g_skipped},tasks:{executed:$t_executed,merged:$t_merged,skipped:$t_skipped,blocked:$t_blocked,failed:$t_failed},orchestrator:{attempted:$o_attempted,succeeded:$o_succeeded,failed:$o_failed,cleanup_ok:$o_cleanup_ok},head:{sha:$head_sha,branch:$head_branch,main_clean:$main_clean},next_action:$next_action}')
+  ui_print_final_summary "$run_id" "$aggregate_json"
 
   if [[ "$failed_count" -gt 0 ]]; then
     return 1
@@ -686,9 +794,8 @@ run_parallel_tasks() {
 cleanup_parallel_run() {
   local workspace="$1"
   local run_id="$2"
-  local integration_branch="$3"
-  local integration_dir
-  integration_dir="$(ralphex_state_dir "$workspace")/integration/$run_id"
-  git -C "$workspace" worktree remove -f "$integration_dir" >/dev/null 2>&1 || true
-  git -C "$workspace" branch -D "$integration_branch" >/dev/null 2>&1 || true
+  local _unused_branch="$3"
+  rm -rf "$(ralphex_worktrees_dir "$workspace")/$run_id" >/dev/null 2>&1 || true
+  rm -rf "$(ralphex_state_dir "$workspace")/integration/$run_id" >/dev/null 2>&1 || true
+  rm -rf "$(ralphex_state_dir "$workspace")/merge-fix/$run_id" >/dev/null 2>&1 || true
 }
