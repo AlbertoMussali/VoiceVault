@@ -29,6 +29,7 @@ class MigrationWiringTests(unittest.TestCase):
         self.assertIn("20260302_0003_create_refresh_sessions.py", migration_files)
         self.assertIn("20260302_0004_create_entry_tags.py", migration_files)
         self.assertIn("20260302_0005_add_transcript_fts_index.py", migration_files)
+        self.assertIn("20260302_0008_create_ask_queries_results.py", migration_files)
 
     def test_schema_v1_migration_creates_required_tables(self) -> None:
         migration_py = (ROOT / "alembic" / "versions" / "20260302_0002_create_schema_v1.py").read_text(

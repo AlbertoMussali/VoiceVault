@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import json
 import os
 from typing import Any
 import uuid
@@ -13,7 +14,8 @@ from sqlalchemy.orm import Session
 
 from app.db import get_sessionmaker
 from app.entry_titles import deterministic_title_from_transcript, fallback_entry_title
-from app.models import AuditLog, AudioAsset, BragBullet, Entry, ExportJob, Transcript
+from app.models import AskQuery, AskResult, AuditLog, AudioAsset, BragBullet, Entry, ExportJob, Transcript
+from app.openai_summary import AskSummarySentence, generate_summary_sentences
 from app.openai_stt import transcribe_audio_bytes
 from app.settings import get_redis_url, get_settings
 from app.storage import get_storage_backend
@@ -143,11 +145,96 @@ def run_brag_text_export_job(export_job_id: str) -> dict[str, Any]:
         session.close()
 
 
+def run_ask_summary_job(ask_query_id: str, snippet_ids: list[str] | None = None) -> dict[str, Any]:
+    """Generate an ask summary with strict per-sentence citation validation."""
+    ask_query_uuid = _parse_uuid(ask_query_id, field_name="ask_query_id")
+    session = get_sessionmaker()()
+    try:
+        ask_query = session.get(AskQuery, ask_query_uuid)
+        if ask_query is None:
+            raise ValueError(f"Ask query not found: {ask_query_uuid}")
+
+        all_results = (
+            session.execute(
+                select(AskResult)
+                .where(AskResult.ask_query_id == ask_query_uuid)
+                .order_by(AskResult.result_order.asc())
+            )
+            .scalars()
+            .all()
+        )
+        if not all_results:
+            raise ValueError("Cannot summarize without ask sources")
+
+        by_id = {str(result.id): result for result in all_results}
+        selected_results = all_results
+        if snippet_ids is not None:
+            requested_ids = _normalize_requested_snippet_ids(snippet_ids)
+            if not requested_ids:
+                raise ValueError("snippet_ids must include at least one value")
+            unknown_ids = [snippet_id for snippet_id in requested_ids if snippet_id not in by_id]
+            if unknown_ids:
+                raise ValueError(f"snippet_ids contain unknown values: {', '.join(unknown_ids)}")
+            selected_results = [by_id[snippet_id] for snippet_id in requested_ids]
+
+        sources = [
+            {
+                "snippet_id": str(result.id),
+                "entry_id": str(result.entry_id),
+                "transcript_id": str(result.transcript_id),
+                "snippet_text": result.snippet_text,
+                "start_char": result.start_char,
+                "end_char": result.end_char,
+            }
+            for result in selected_results
+        ]
+        settings = get_settings()
+        _write_audit_event(
+            entry_id=None,
+            user_id=ask_query.user_id,
+            event_type="llm_called",
+            metadata_json={
+                "model": settings.openai_summary_model,
+                "snippet_count": len(sources),
+                "byte_estimate": _estimate_summary_request_bytes(query_text=ask_query.query_text, sources=sources),
+            },
+        )
+        generated_sentences = generate_summary_sentences(
+            query_text=ask_query.query_text,
+            sources=sources,
+        )
+        validated_sentences = validate_summary_sentences(
+            generated_sentences,
+            allowed_snippet_ids={item["snippet_id"] for item in sources},
+        )
+
+        ask_query.summary_status = "done"
+        ask_query.summary_json = {"sentences": validated_sentences}
+        ask_query.summary_error = None
+        session.commit()
+        return {
+            "query_id": str(ask_query.id),
+            "summary_status": ask_query.summary_status,
+            "summary": ask_query.summary_json,
+        }
+    except Exception as exc:
+        session.rollback()
+        ask_query = session.get(AskQuery, ask_query_uuid)
+        if ask_query is not None:
+            ask_query.summary_status = "error"
+            ask_query.summary_error = str(exc)[:2000]
+            session.commit()
+        raise
+    finally:
+        session.close()
+
+
 JOB_REGISTRY: dict[str, Callable[..., Any]] = {
     "stub.echo": run_stub_job,
     "transcription.process_entry_audio": run_transcription_job,
     "transcription.openai_stt_v1": run_transcription_job,
     "brag.export_text_v1": run_brag_text_export_job,
+    "ask.summary_v1": run_ask_summary_job,
 }
 
 
@@ -209,7 +296,7 @@ def _next_transcript_version(session: Session, entry_uuid: uuid.UUID) -> int:
 
 def _write_audit_event(
     *,
-    entry_id: uuid.UUID,
+    entry_id: uuid.UUID | None,
     user_id: uuid.UUID,
     event_type: str,
     metadata_json: dict[str, Any],
@@ -224,6 +311,14 @@ def _write_audit_event(
             )
         )
         audit_session.commit()
+
+
+def _estimate_summary_request_bytes(*, query_text: str, sources: list[dict[str, Any]]) -> int:
+    payload = {
+        "query_text": query_text,
+        "sources": sources,
+    }
+    return len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
 
 
 def _build_brag_text_report(bullets: list[BragBullet]) -> str:
@@ -262,3 +357,53 @@ def _build_brag_text_report(bullets: list[BragBullet]) -> str:
         lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _normalize_requested_snippet_ids(snippet_ids: list[str]) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in snippet_ids:
+        snippet_id = str(raw).strip()
+        if not snippet_id:
+            continue
+        if snippet_id in seen:
+            continue
+        seen.add(snippet_id)
+        normalized.append(snippet_id)
+    return normalized
+
+
+def validate_summary_sentences(
+    sentences: list[AskSummarySentence],
+    *,
+    allowed_snippet_ids: set[str],
+) -> list[dict[str, Any]]:
+    """Validate generated summary structure and enforce citation boundaries."""
+    validated: list[dict[str, Any]] = []
+    for sentence in sentences:
+        text = sentence.text.strip()
+        if not text:
+            raise ValueError("Summary sentence text cannot be empty")
+
+        raw_ids = [snippet_id.strip() for snippet_id in sentence.snippet_ids if snippet_id.strip()]
+        if not raw_ids:
+            raise ValueError("Summary sentence is uncited")
+
+        deduped_ids: list[str] = []
+        seen: set[str] = set()
+        for snippet_id in raw_ids:
+            if snippet_id not in allowed_snippet_ids:
+                raise ValueError(f"Summary sentence uses invalid snippet_id: {snippet_id}")
+            if snippet_id in seen:
+                continue
+            seen.add(snippet_id)
+            deduped_ids.append(snippet_id)
+
+        if not deduped_ids:
+            raise ValueError("Summary sentence is uncited")
+
+        validated.append({"text": text, "snippet_ids": deduped_ids})
+
+    if not validated:
+        raise ValueError("Summary must include at least one sentence")
+    return validated

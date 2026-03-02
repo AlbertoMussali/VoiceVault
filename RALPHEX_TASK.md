@@ -202,21 +202,21 @@ Notes:
 
 ## Phase 6 — Ask v1 (sources-first + optional summary with enforced citations)
 
-- [ ] [FE] Implement Ask UI (query + templates + date range + sources list). <!-- group: 700 -->
+- [x] [FE] Implement Ask UI (query + templates + date range + sources list). <!-- group: 700 -->
   - Done when: sources-only results are always available.
-- [ ] [BE] Implement Ask retrieval endpoint (store ask_queries/results; reuse search ranking). <!-- group: 700 -->
+- [x] [BE] Implement Ask retrieval endpoint (store ask_queries/results; reuse search ranking). <!-- group: 700 -->
   - Done when: returns a bounded list of sources (5–12) quickly.
-- [ ] [FE] Implement “What gets sent” preview modal + toggles (redact, mask, include sensitive). <!-- group: 700 -->
+- [x] [FE] Implement “What gets sent” preview modal + toggles (redact, mask, include sensitive). <!-- group: 700 -->
   - Done when: user can see outbound payload shape before summarization.
-- [ ] [BE] Implement deterministic outbound redaction/masking pipeline (never mutates stored data). <!-- group: 700 -->
+- [x] [BE] Implement deterministic outbound redaction/masking pipeline (never mutates stored data). <!-- group: 700 -->
   - Done when: transformations apply only to provider-bound payload.
-- [ ] [AI] Implement summary job: JSON sentences with snippet_ids + server-side validation. <!-- group: 700 -->
+- [x] [AI] Implement summary job: JSON sentences with snippet_ids + server-side validation. <!-- group: 700 -->
   - Done when: uncited sentences are rejected; only provided snippet_ids allowed.
-- [ ] [FE] Implement summary renderer with per-sentence citations + jump to highlight. <!-- group: 700 -->
+- [x] [FE] Implement summary renderer with per-sentence citations + jump to highlight. <!-- group: 700 -->
   - Done when: every sentence has clickable evidence.
-- [ ] [BE] Add audit event `llm_called` storing metadata only (model, snippet_count, byte estimate). <!-- group: 700 -->
+- [x] [BE] Add audit event `llm_called` storing metadata only (model, snippet_count, byte estimate). <!-- group: 700 -->
   - Done when: no content stored in audit trail.
-- [ ] [QA] Add adversarial tests for citation enforcement + sensitive exclusion default. <!-- group: 700 -->
+- [x] [QA] Add adversarial tests for citation enforcement + sensitive exclusion default. <!-- group: 700 -->
   - Done when: regression prevents “freeform” output.
 
 ## Phase 7 — Production controls: export, deletion, audit, retention gating

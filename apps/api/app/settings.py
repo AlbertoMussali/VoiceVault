@@ -21,6 +21,7 @@ DEFAULT_REFRESH_TOKEN_TTL_DAYS = 30
 DEFAULT_ENTRY_AUTH_TOKEN = "dev-entry-token"
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_OPENAI_STT_MODEL = "gpt-4o-mini-transcribe"
+DEFAULT_OPENAI_SUMMARY_MODEL = "gpt-4o-mini"
 
 
 def get_database_url() -> str:
@@ -53,6 +54,7 @@ class Settings:
     openai_api_key: str
     openai_base_url: str
     openai_stt_model: str
+    openai_summary_model: str
 
 
 @lru_cache(maxsize=1)
@@ -72,4 +74,5 @@ def get_settings() -> Settings:
         openai_api_key=os.getenv("OPENAI_API_KEY", ""),
         openai_base_url=os.getenv("OPENAI_BASE_URL", DEFAULT_OPENAI_BASE_URL),
         openai_stt_model=os.getenv("OPENAI_STT_MODEL", DEFAULT_OPENAI_STT_MODEL),
+        openai_summary_model=os.getenv("OPENAI_SUMMARY_MODEL", DEFAULT_OPENAI_SUMMARY_MODEL),
     )

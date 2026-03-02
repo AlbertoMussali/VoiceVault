@@ -40,6 +40,7 @@ class User(Base):
     brag_bullets: Mapped[list["BragBullet"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     citations: Mapped[list["Citation"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     export_jobs: Mapped[list["ExportJob"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    ask_queries: Mapped[list["AskQuery"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     refresh_sessions: Mapped[list["RefreshSession"]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
@@ -263,6 +264,61 @@ class ExportJob(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
 
     user: Mapped["User"] = relationship(back_populates="export_jobs")
+
+
+class AskQuery(Base):
+    __tablename__ = "ask_queries"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    query_text: Mapped[str] = mapped_column(Text, nullable=False)
+    result_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=8)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="done")
+    summary_status: Mapped[str] = mapped_column(String(32), nullable=False, default="not_requested")
+    summary_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    summary_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), index=True)
+
+    user: Mapped["User"] = relationship(back_populates="ask_queries")
+    results: Mapped[list["AskResult"]] = relationship(back_populates="ask_query", cascade="all, delete-orphan")
+
+
+class AskResult(Base):
+    __tablename__ = "ask_results"
+    __table_args__ = (UniqueConstraint("ask_query_id", "result_order", name="uq_ask_results_query_order"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    ask_query_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("ask_queries.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    entry_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("entries.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    transcript_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("transcripts.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    snippet_text: Mapped[str] = mapped_column(Text, nullable=False)
+    start_char: Mapped[int] = mapped_column(Integer, nullable=False)
+    end_char: Mapped[int] = mapped_column(Integer, nullable=False)
+    rank: Mapped[float] = mapped_column(Numeric(12, 3), nullable=False)
+    result_order: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), index=True)
+
+    ask_query: Mapped["AskQuery"] = relationship(back_populates="results")
 
 
 class AuditLog(Base):

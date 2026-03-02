@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent 
 import { useNavigate } from 'react-router-dom';
 
 import { useAuth } from '@/auth/AuthProvider';
+import { AskSummaryRenderer, type AskSummaryCitation, type AskSummarySentence } from '@/components/AskSummaryRenderer';
 import { Button } from '@/components/ui/Button';
 import { listBragDrafts, updateBragDraft, type BragDraft } from '@/lib/bragDrafts';
 import {
@@ -46,6 +47,12 @@ type TimelineEntryRecord = {
   quote: string | null;
 };
 
+type AskPreviewOptions = {
+  redact: boolean;
+  mask: boolean;
+  includeSensitive: boolean;
+};
+
 const READY_STATUSES = new Set(['ready', 'completed', 'done']);
 const ERROR_STATUSES = new Set(['error', 'failed', 'fatal']);
 const MAX_STATUS_POLLS = 40;
@@ -53,11 +60,46 @@ const SEARCH_RESULT_LIMIT = 12;
 const INDEXING_STORAGE_KEY = 'voicevault.entry-indexing.v1';
 const TIMELINE_STORAGE_KEY = 'voicevault.timeline.v1';
 const ENTRY_TYPE_OPTIONS = ['win', 'blocker', 'idea', 'task', 'learning'];
+const ASK_TEMPLATES = [
+  { label: 'Wins this week', query: 'What wins did I mention this week?' },
+  { label: 'Blockers', query: 'What blockers keep coming up?' },
+  { label: 'Commitments', query: 'What did I say I would do next?' },
+  { label: 'Themes', query: 'What themes are repeating lately?' }
+] as const;
 const MAX_QUOTE_CHARS = 160;
 const BRAG_BUCKETS = ['Impact', 'Execution', 'Leadership', 'Collaboration', 'Growth'] as const;
 const BRAG_UNASSIGNED_BUCKET = 'Unassigned';
 const BRAG_EXPORT_READY_STATUSES = new Set(['completed']);
 const BRAG_EXPORT_FAILED_STATUSES = new Set(['failed', 'error']);
+const SENSITIVE_TAG_TOKENS = new Set(['sensitive', 'work_sensitive', 'work-sensitive', 'confidential', 'private', 'raw_only', 'raw-only']);
+const ASK_SUMMARY_SENTENCE_LIMIT = 4;
+
+function isSensitiveTimelineEntry(entry: TimelineEntryRecord | undefined): boolean {
+  if (!entry) {
+    return false;
+  }
+
+  return entry.tags.some((tag) => SENSITIVE_TAG_TOKENS.has(tag.trim().toLowerCase()));
+}
+
+function applyPreviewTransforms(text: string, options: AskPreviewOptions): string {
+  let next = text;
+
+  if (options.redact) {
+    next = next
+      .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, '[REDACTED_EMAIL]')
+      .replace(/\b(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)?\d{3}[-.\s]?\d{4}\b/g, '[REDACTED_PHONE]');
+  }
+
+  if (options.mask) {
+    next = next
+      .replace(/\b\d{9,}\b/g, (value) => `***${value.slice(-4)}`)
+      .replace(/\b\d{4}[- ]\d{4}[- ]\d{4}[- ]\d{4}\b/g, '[MASKED_CARD]')
+      .replace(/https?:\/\/[^\s]+/gi, '[MASKED_URL]');
+  }
+
+  return next;
+}
 
 function normalizeQuote(raw: string | null | undefined): string | null {
   if (typeof raw !== 'string') {
@@ -130,6 +172,30 @@ function formatBragDate(raw: string): string {
   }
 
   return date.toLocaleDateString();
+}
+
+function summarizeSnippetSentence(text: string): string {
+  const normalized = text.replace(/\s+/g, ' ').trim();
+  if (!normalized) {
+    return 'Source snippet was empty.';
+  }
+
+  const firstSentence = normalized.match(/.*?[.!?](?:\s|$)/)?.[0]?.trim();
+  return firstSentence ?? normalized;
+}
+
+function buildAskSummarySentences(question: string, citations: AskSummaryCitation[]): AskSummarySentence[] {
+  const questionText = question.trim();
+  return citations.slice(0, ASK_SUMMARY_SENTENCE_LIMIT).map((citation, index) => {
+    const baseSentence = summarizeSnippetSentence(citation.snippetText);
+    const text = index === 0 && questionText ? `For "${questionText}", ${baseSentence}` : baseSentence;
+
+    return {
+      id: `${citation.snippetId}-sentence`,
+      text,
+      citationSnippetIds: [citation.snippetId]
+    };
+  });
 }
 
 function readStoredIndexing(): Record<string, EntryIndexingData> {
@@ -356,6 +422,20 @@ export function AppPage() {
   const [isSearchLoading, setIsSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+  const [askQueryInput, setAskQueryInput] = useState('');
+  const [submittedAskQuery, setSubmittedAskQuery] = useState('');
+  const [askDateFrom, setAskDateFrom] = useState('');
+  const [askDateTo, setAskDateTo] = useState('');
+  const [isAskLoading, setIsAskLoading] = useState(false);
+  const [askError, setAskError] = useState<string | null>(null);
+  const [askSources, setAskSources] = useState<SearchResult[]>([]);
+  const [askQuestionInput, setAskQuestionInput] = useState('');
+  const [isWhatGetsSentModalOpen, setIsWhatGetsSentModalOpen] = useState(false);
+  const [askPreviewOptions, setAskPreviewOptions] = useState<AskPreviewOptions>({
+    redact: true,
+    mask: true,
+    includeSensitive: false
+  });
   const [isIndexingModalOpen, setIsIndexingModalOpen] = useState(false);
   const [indexType, setIndexType] = useState('');
   const [indexContext, setIndexContext] = useState<EntryContext | null>(null);
@@ -437,6 +517,14 @@ export function AppPage() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (!submittedSearchQuery) {
+      return;
+    }
+
+    setAskQuestionInput((previous) => (previous.trim().length > 0 ? previous : submittedSearchQuery));
+  }, [submittedSearchQuery]);
 
   function stopPolling() {
     if (pollTimerRef.current !== null) {
@@ -636,6 +724,47 @@ export function AppPage() {
     setTranscriptError(null);
     setTranscriptNotice(null);
     setIsEditingTranscript(false);
+  }
+
+  async function handleAskSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const query = askQueryInput.trim();
+    setSubmittedAskQuery(query);
+    setAskError(null);
+
+    if (!query) {
+      setAskSources([]);
+      return;
+    }
+
+    setIsAskLoading(true);
+    try {
+      const results = await searchEntries(query, SEARCH_RESULT_LIMIT);
+      setAskSources(results);
+    } catch (error) {
+      setAskError(error instanceof Error ? error.message : 'Ask retrieval failed.');
+      setAskSources([]);
+    } finally {
+      setIsAskLoading(false);
+    }
+  }
+
+  function applyAskTemplate(templateQuery: string) {
+    setAskQueryInput(templateQuery);
+    setSubmittedAskQuery(templateQuery);
+    setAskError(null);
+    void (async () => {
+      setIsAskLoading(true);
+      try {
+        const results = await searchEntries(templateQuery, SEARCH_RESULT_LIMIT);
+        setAskSources(results);
+      } catch (error) {
+        setAskError(error instanceof Error ? error.message : 'Ask retrieval failed.');
+        setAskSources([]);
+      } finally {
+        setIsAskLoading(false);
+      }
+    })();
   }
 
   async function handleSearchSubmit(event: FormEvent<HTMLFormElement>) {
@@ -1120,8 +1249,110 @@ export function AppPage() {
     return byBucket;
   }, [bragDraftsInRange]);
   const hasSearchAttempt = useMemo(() => submittedSearchQuery.length > 0, [submittedSearchQuery]);
+  const hasAskAttempt = useMemo(() => submittedAskQuery.length > 0, [submittedAskQuery]);
+  const filteredAskSources = useMemo(
+    () =>
+      askSources.filter((source) => {
+        const timelineEntry = timelineByEntry[source.entryId];
+        if (!timelineEntry) {
+          return !askDateFrom && !askDateTo;
+        }
+
+        const sourceDateRaw = timelineEntry.occurredAt ?? timelineEntry.createdAt;
+        const sourceDate = sourceDateRaw ? new Date(sourceDateRaw) : null;
+        const sourceDay = sourceDate && !Number.isNaN(sourceDate.getTime()) ? sourceDate.toISOString().slice(0, 10) : null;
+
+        if (askDateFrom && (!sourceDay || sourceDay < askDateFrom)) {
+          return false;
+        }
+
+        if (askDateTo && (!sourceDay || sourceDay > askDateTo)) {
+          return false;
+        }
+
+        return true;
+      }),
+    [askDateFrom, askDateTo, askSources, timelineByEntry]
+  );
+  const askSourcesForPreview = useMemo(() => {
+    return filteredAskSources
+      .map((result, index) => {
+        const timelineEntry = timelineByEntry[result.entryId];
+        const occurredAt = normalizeIsoDate(timelineEntry?.occurredAt ?? timelineEntry?.createdAt ?? null);
+        return {
+          result,
+          snippetId: `${result.entryId}:${result.startChar}:${result.endChar}:${index}`,
+          occurredAt,
+          isSensitive: isSensitiveTimelineEntry(timelineEntry)
+        };
+      })
+      .filter((item) => askPreviewOptions.includeSensitive || !item.isSensitive)
+      .map((item) => ({
+        snippet_id: item.snippetId,
+        entry_id: item.result.entryId,
+        transcript_id: item.result.transcriptId,
+        start_char: item.result.startChar,
+        end_char: item.result.endChar,
+        occurred_at: item.occurredAt,
+        is_sensitive: item.isSensitive,
+        snippet_text: applyPreviewTransforms(item.result.snippetText, askPreviewOptions)
+      }));
+  }, [askPreviewOptions, filteredAskSources, timelineByEntry]);
+  const askPreviewPayload = useMemo(() => {
+    const query = askQuestionInput.trim() || submittedAskQuery || submittedSearchQuery;
+    return {
+      query,
+      date_range: {
+        from: askDateFrom || null,
+        to: askDateTo || null
+      },
+      controls: {
+        redact: askPreviewOptions.redact,
+        mask: askPreviewOptions.mask,
+        include_sensitive: askPreviewOptions.includeSensitive
+      },
+      snippet_count: askSourcesForPreview.length,
+      snippets: askSourcesForPreview
+    };
+  }, [askDateFrom, askDateTo, askPreviewOptions, askQuestionInput, askSourcesForPreview, submittedAskQuery, submittedSearchQuery]);
+  const askPreviewPayloadJson = useMemo(() => JSON.stringify(askPreviewPayload, null, 2), [askPreviewPayload]);
+  const askSummaryCitations = useMemo<AskSummaryCitation[]>(
+    () =>
+      filteredAskSources.map((source, index) => ({
+        snippetId: `${source.entryId}:${source.startChar}:${source.endChar}:${index}`,
+        entryId: source.entryId,
+        startChar: source.startChar,
+        endChar: source.endChar,
+        snippetText: source.snippetText
+      })),
+    [filteredAskSources]
+  );
+  const askSummaryCitationsBySnippetId = useMemo<Record<string, AskSummaryCitation>>(
+    () =>
+      askSummaryCitations.reduce<Record<string, AskSummaryCitation>>((accumulator, citation) => {
+        accumulator[citation.snippetId] = citation;
+        return accumulator;
+      }, {}),
+    [askSummaryCitations]
+  );
+  const askSummarySentences = useMemo(
+    () => buildAskSummarySentences(askQuestionInput || submittedAskQuery, askSummaryCitations),
+    [askQuestionInput, askSummaryCitations, submittedAskQuery]
+  );
   const bragExportStatusLabel = bragExportJob?.status ?? null;
   const isBragExportReady = BRAG_EXPORT_READY_STATUSES.has((bragExportJob?.status ?? '').trim().toLowerCase());
+
+  function openAskCitation(citation: AskSummaryCitation) {
+    const params = new URLSearchParams({
+      start: String(citation.startChar),
+      end: String(citation.endChar)
+    });
+    const askQuery = submittedAskQuery || askQuestionInput.trim();
+    if (askQuery) {
+      params.set('q', askQuery);
+    }
+    navigate(`/app/entries/${citation.entryId}?${params.toString()}`);
+  }
 
   return (
     <main className="min-h-screen bg-gradient-to-br from-sky-50 via-cyan-50 to-emerald-100 p-6">
@@ -1296,6 +1527,125 @@ export function AppPage() {
         </div>
         <div className="mt-6 space-y-4 rounded-md border bg-background p-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
+            <h2 className="text-base font-semibold">Ask</h2>
+            <span className="text-xs text-muted-foreground">Sources-first retrieval</span>
+          </div>
+          <p className="text-sm text-muted-foreground">Ask a question, use a template, filter by date range, and review source snippets.</p>
+          <form onSubmit={handleAskSubmit} className="flex flex-col gap-3 sm:flex-row">
+            <input
+              type="search"
+              value={askQueryInput}
+              onChange={(event) => setAskQueryInput(event.target.value)}
+              placeholder="Ask from your transcripts..."
+              className="h-10 w-full rounded-md border bg-background px-3 text-sm"
+            />
+            <Button type="submit" disabled={isAskLoading} className="sm:w-auto">
+              {isAskLoading ? 'Finding sources...' : 'Find sources'}
+            </Button>
+          </form>
+          <div className="flex flex-wrap gap-2">
+            {ASK_TEMPLATES.map((template) => (
+              <Button
+                key={template.label}
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => applyAskTemplate(template.query)}
+                disabled={isAskLoading}
+              >
+                {template.label}
+              </Button>
+            ))}
+          </div>
+          <div className="grid gap-3 md:grid-cols-2">
+            <label className="space-y-1 text-sm">
+              <span className="font-medium">Date from</span>
+              <input
+                type="date"
+                value={askDateFrom}
+                onChange={(event) => setAskDateFrom(event.target.value)}
+                className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+              />
+            </label>
+            <label className="space-y-1 text-sm">
+              <span className="font-medium">Date to</span>
+              <input
+                type="date"
+                value={askDateTo}
+                onChange={(event) => setAskDateTo(event.target.value)}
+                className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+              />
+            </label>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                setAskDateFrom('');
+                setAskDateTo('');
+              }}
+            >
+              Clear range
+            </Button>
+          </div>
+          {askError ? <p className="text-sm text-destructive">{askError}</p> : null}
+          {isAskLoading ? <p className="text-sm text-muted-foreground">Loading sources...</p> : null}
+          {filteredAskSources.length > 0 ? (
+            <div className="space-y-3">
+              {filteredAskSources.map((source, index) => {
+                const sourceDate = timelineByEntry[source.entryId]?.occurredAt ?? timelineByEntry[source.entryId]?.createdAt;
+                const citation: AskSummaryCitation = {
+                  snippetId: `${source.entryId}:${source.startChar}:${source.endChar}:${index}`,
+                  entryId: source.entryId,
+                  startChar: source.startChar,
+                  endChar: source.endChar,
+                  snippetText: source.snippetText
+                };
+                return (
+                  <article key={`${source.entryId}-${source.startChar}-${source.endChar}-${index}`} className="rounded-md border p-3">
+                    <p className="text-xs text-muted-foreground">
+                      Entry: {source.entryId}
+                      {sourceDate ? ` | ${formatTimelineDate(sourceDate)}` : ''}
+                    </p>
+                    <p className="mt-2 text-sm">{source.snippetText}</p>
+                    <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+                      <p className="text-xs text-muted-foreground">
+                        Source offsets: {source.startChar}-{source.endChar}
+                      </p>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => openAskCitation(citation)}
+                      >
+                        Open source
+                      </Button>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          ) : null}
+          <div className="rounded-md border bg-muted/20 p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h3 className="text-sm font-semibold">Summary</h3>
+              <span className="text-xs text-muted-foreground">Per-sentence citations</span>
+            </div>
+            <p className="mt-1 text-xs text-muted-foreground">Every summary sentence includes clickable evidence that jumps to transcript highlights.</p>
+            <div className="mt-3">
+              <AskSummaryRenderer
+                sentences={askSummarySentences}
+                citationsBySnippetId={askSummaryCitationsBySnippetId}
+                onOpenCitation={openAskCitation}
+              />
+            </div>
+          </div>
+          {hasAskAttempt && !isAskLoading && !askError && filteredAskSources.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No sources found for "{submittedAskQuery}" in the selected range.</p>
+          ) : null}
+        </div>
+        <div className="mt-6 space-y-4 rounded-md border bg-background p-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
             <h2 className="text-base font-semibold">Search</h2>
             <span className="text-xs text-muted-foreground">Transcript search with highlight jump</span>
           </div>
@@ -1347,6 +1697,94 @@ export function AppPage() {
           {hasSearchAttempt && !isSearchLoading && !searchError && searchResults.length === 0 ? (
             <p className="text-sm text-muted-foreground">No matches found for "{submittedSearchQuery}".</p>
           ) : null}
+        </div>
+        <div className="mt-6 space-y-4 rounded-md border bg-background p-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h2 className="text-base font-semibold">What gets sent</h2>
+            <span className="text-xs text-muted-foreground">Preview provider-bound payload before summarization</span>
+          </div>
+          <label className="space-y-1 text-sm">
+            <span className="font-medium">Ask query</span>
+            <input
+              type="text"
+              value={askQuestionInput}
+              onChange={(event) => setAskQuestionInput(event.target.value)}
+              placeholder="What should I summarize from these sources?"
+              className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+            />
+          </label>
+          <div className="grid gap-3 md:grid-cols-2">
+            <label className="space-y-1 text-sm">
+              <span className="font-medium">Date from</span>
+              <input
+                type="date"
+                value={askDateFrom}
+                onChange={(event) => setAskDateFrom(event.target.value)}
+                className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+              />
+            </label>
+            <label className="space-y-1 text-sm">
+              <span className="font-medium">Date to</span>
+              <input
+                type="date"
+                value={askDateTo}
+                onChange={(event) => setAskDateTo(event.target.value)}
+                className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+              />
+            </label>
+          </div>
+          <div className="space-y-2 rounded-md border bg-muted/20 p-3 text-sm">
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={askPreviewOptions.redact}
+                onChange={(event) =>
+                  setAskPreviewOptions((previous) => ({
+                    ...previous,
+                    redact: event.target.checked
+                  }))
+                }
+              />
+              <span>Redact direct identifiers (emails, phones)</span>
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={askPreviewOptions.mask}
+                onChange={(event) =>
+                  setAskPreviewOptions((previous) => ({
+                    ...previous,
+                    mask: event.target.checked
+                  }))
+                }
+              />
+              <span>Mask long numbers and URLs</span>
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={askPreviewOptions.includeSensitive}
+                onChange={(event) =>
+                  setAskPreviewOptions((previous) => ({
+                    ...previous,
+                    includeSensitive: event.target.checked
+                  }))
+                }
+              />
+              <span>Include sensitive snippets</span>
+            </label>
+          </div>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <p className="text-xs text-muted-foreground">
+              {askSourcesForPreview.length} snippet{askSourcesForPreview.length === 1 ? '' : 's'} in outbound payload
+            </p>
+            <Button
+              onClick={() => setIsWhatGetsSentModalOpen(true)}
+              disabled={askPreviewPayload.query.trim().length === 0 || askSourcesForPreview.length === 0}
+            >
+              Preview payload
+            </Button>
+          </div>
         </div>
         <div className="mt-6 space-y-4 rounded-md border bg-background p-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
@@ -1614,6 +2052,31 @@ export function AppPage() {
           </Button>
         </div>
       </section>
+      {isWhatGetsSentModalOpen ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4" role="presentation">
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="what-gets-sent-title"
+            className="w-full max-w-3xl rounded-lg border bg-card p-6 text-card-foreground shadow-lg"
+          >
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <h2 id="what-gets-sent-title" className="text-lg font-semibold">
+                  What gets sent
+                </h2>
+                <p className="mt-1 text-sm text-muted-foreground">This preview shows transformed snippets only. Stored transcript data is unchanged.</p>
+              </div>
+              <Button onClick={() => setIsWhatGetsSentModalOpen(false)} variant="outline" size="sm">
+                Close
+              </Button>
+            </div>
+            <div className="mt-4 rounded-md border bg-muted/20 p-3">
+              <pre className="max-h-[60vh] overflow-auto text-xs">{askPreviewPayloadJson}</pre>
+            </div>
+          </section>
+        </div>
+      ) : null}
       {isIndexingModalOpen && entryId ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4" role="presentation">
           <section

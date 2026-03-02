@@ -11,6 +11,7 @@ from app.auth import authorize_entries_request
 from app.db import initialize_schema
 from app.errors import ApiContractError
 from app.routers.auth import router as auth_router
+from app.routes.ask import router as ask_router
 from app.routes.brag import router as brag_router
 from app.routes.brag_export import router as brag_export_router
 from app.routes.entries import router as entries_router
@@ -54,6 +55,7 @@ def create_app(audit_session_factory: sessionmaker[Session] | None = None) -> Fa
     app.include_router(auth_router)
     app.include_router(entries_router)
     app.include_router(search_router)
+    app.include_router(ask_router)
     app.include_router(tags_router)
     app.include_router(brag_router)
     app.include_router(brag_export_router)
