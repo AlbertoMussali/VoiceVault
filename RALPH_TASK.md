@@ -86,7 +86,7 @@ Notes:
   - Done when: tree exists; minimal READMEs in each folder explain purpose.
 - [x] [INF] Add dev Docker Compose stack (api, worker, db, redis, web). <!-- group: 100 -->
   - Done when: `docker compose up` boots all services without manual steps.
-- [ ] [BE] Implement FastAPI skeleton (`/health`, `/version`, settings loader). <!-- group: 100 -->
+- [x] [BE] Implement FastAPI skeleton (`/health`, `/version`, settings loader). <!-- group: 100 -->
   - Done when: API container serves health/version endpoints.
 - [x] [FE] Implement Vite + React skeleton with routes (`/login`, `/signup`, `/app`). <!-- group: 100 -->
   - Done when: web container serves UI and routes render.
