@@ -456,6 +456,21 @@ export async function fetchEntryAudioBlob(entryId: string): Promise<Blob | null>
   return response.blob();
 }
 
+export async function deleteEntry(entryId: string): Promise<void> {
+  const response = await authorizedRequest(`/api/v1/entries/${entryId}`, {
+    method: 'DELETE'
+  });
+
+  if (response.status === 204) {
+    return;
+  }
+
+  const payload = await parseResponsePayload(response);
+  if (!response.ok) {
+    throw new EntryApiError(parseErrorMessage(payload, 'Failed to delete entry.'), response.status, parseErrorContract(payload));
+  }
+}
+
 export async function updateEntryTranscript(entryId: string, transcriptText: string): Promise<TranscriptResponse> {
   const payload = await authorizedFetch(`/api/v1/entries/${entryId}/transcript`, {
     method: 'PATCH',

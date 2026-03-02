@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import datetime, timezone
+import io
 import json
 import os
 from typing import Any
 import uuid
+import zipfile
 
 from redis import Redis
 from rq import Queue
@@ -14,7 +17,20 @@ from sqlalchemy.orm import Session
 
 from app.db import get_sessionmaker
 from app.entry_titles import deterministic_title_from_transcript, fallback_entry_title
-from app.models import AskQuery, AskResult, AuditLog, AudioAsset, BragBullet, Entry, ExportJob, Transcript
+from app.models import (
+    AskQuery,
+    AskResult,
+    AuditLog,
+    AudioAsset,
+    BragBullet,
+    BragBulletCitation,
+    Citation,
+    Entry,
+    EntryTag,
+    ExportJob,
+    Tag,
+    Transcript,
+)
 from app.openai_summary import AskSummarySentence, generate_summary_sentences
 from app.openai_stt import transcribe_audio_bytes
 from app.settings import get_redis_url, get_settings
@@ -145,6 +161,55 @@ def run_brag_text_export_job(export_job_id: str) -> dict[str, Any]:
         session.close()
 
 
+def run_account_export_all_job(export_job_id: str) -> dict[str, Any]:
+    """Build a full account export zip with JSON + transcripts + tags + brag + audio blobs."""
+    export_job_uuid = _parse_uuid(export_job_id, field_name="export_job_id")
+    session = get_sessionmaker()()
+    try:
+        export_job = session.get(ExportJob, export_job_uuid)
+        if export_job is None:
+            raise ValueError(f"Export job not found: {export_job_uuid}")
+
+        export_job.status = "processing"
+        export_job.error_message = None
+        session.commit()
+
+        payload, audio_assets = _build_account_export_payload(session=session, user_id=export_job.user_id)
+        archive_bytes = _build_account_export_archive(payload=payload, audio_assets=audio_assets)
+
+        storage_key = f"exports/account/{export_job.user_id}/{export_job.id}/voicevault-export-all.zip"
+        get_storage_backend().put(storage_key, archive_bytes)
+
+        export_job.status = "completed"
+        export_job.artifact_storage_key = storage_key
+        export_job.metadata_json = {
+            "entry_count": len(payload["entries"]),
+            "audio_asset_count": len(audio_assets),
+            "tag_count": len(payload["tags"]),
+            "brag_bullet_count": len(payload["brag"]["bullets"]),
+            "file_name": "voicevault-export-all.zip",
+        }
+        session.commit()
+
+        return {
+            "status": "ok",
+            "export_job_id": str(export_job.id),
+            "artifact_storage_key": storage_key,
+            "entry_count": len(payload["entries"]),
+            "audio_asset_count": len(audio_assets),
+        }
+    except Exception as exc:
+        session.rollback()
+        export_job = session.get(ExportJob, export_job_uuid)
+        if export_job is not None:
+            export_job.status = "failed"
+            export_job.error_message = str(exc)[:2000]
+            session.commit()
+        raise
+    finally:
+        session.close()
+
+
 def run_ask_summary_job(ask_query_id: str, snippet_ids: list[str] | None = None) -> dict[str, Any]:
     """Generate an ask summary with strict per-sentence citation validation."""
     ask_query_uuid = _parse_uuid(ask_query_id, field_name="ask_query_id")
@@ -234,6 +299,7 @@ JOB_REGISTRY: dict[str, Callable[..., Any]] = {
     "transcription.process_entry_audio": run_transcription_job,
     "transcription.openai_stt_v1": run_transcription_job,
     "brag.export_text_v1": run_brag_text_export_job,
+    "account.export_all_v1": run_account_export_all_job,
     "ask.summary_v1": run_ask_summary_job,
 }
 
@@ -357,6 +423,214 @@ def _build_brag_text_report(bullets: list[BragBullet]) -> str:
         lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _build_account_export_payload(*, session: Session, user_id: uuid.UUID) -> tuple[dict[str, Any], list[AudioAsset]]:
+    entries = (
+        session.execute(
+            select(Entry)
+            .where(Entry.user_id == user_id)
+            .order_by(Entry.created_at.asc(), Entry.id.asc())
+        )
+        .scalars()
+        .all()
+    )
+    entry_ids = [entry.id for entry in entries]
+
+    transcripts = (
+        session.execute(
+            select(Transcript)
+            .join(Entry, Entry.id == Transcript.entry_id)
+            .where(Entry.user_id == user_id)
+            .order_by(Transcript.entry_id.asc(), Transcript.version.asc())
+        )
+        .scalars()
+        .all()
+    )
+    transcripts_by_entry: dict[uuid.UUID, list[Transcript]] = {}
+    for transcript in transcripts:
+        transcripts_by_entry.setdefault(transcript.entry_id, []).append(transcript)
+
+    audio_assets = (
+        session.execute(
+            select(AudioAsset)
+            .join(Entry, Entry.id == AudioAsset.entry_id)
+            .where(Entry.user_id == user_id)
+            .order_by(AudioAsset.entry_id.asc(), AudioAsset.created_at.asc(), AudioAsset.id.asc())
+        )
+        .scalars()
+        .all()
+    )
+    audio_by_entry: dict[uuid.UUID, list[AudioAsset]] = {}
+    for asset in audio_assets:
+        audio_by_entry.setdefault(asset.entry_id, []).append(asset)
+
+    tags = (
+        session.execute(
+            select(Tag)
+            .where(Tag.user_id == user_id)
+            .order_by(Tag.name.asc(), Tag.id.asc())
+        )
+        .scalars()
+        .all()
+    )
+    tags_by_id = {tag.id: tag for tag in tags}
+    entry_tag_pairs = (
+        session.execute(
+            select(EntryTag)
+            .where(EntryTag.entry_id.in_(entry_ids))
+            .order_by(EntryTag.entry_id.asc(), EntryTag.created_at.asc(), EntryTag.id.asc())
+        )
+        .scalars()
+        .all()
+        if entry_ids
+        else []
+    )
+    tag_ids_by_entry: dict[uuid.UUID, list[str]] = {}
+    for pair in entry_tag_pairs:
+        if pair.tag_id not in tags_by_id:
+            continue
+        tag_ids_by_entry.setdefault(pair.entry_id, []).append(str(pair.tag_id))
+
+    brag_bullets = (
+        session.execute(
+            select(BragBullet)
+            .where(BragBullet.user_id == user_id)
+            .order_by(BragBullet.created_at.asc(), BragBullet.id.asc())
+        )
+        .scalars()
+        .all()
+    )
+    citations = (
+        session.execute(
+            select(Citation)
+            .where(Citation.user_id == user_id)
+            .order_by(Citation.created_at.asc(), Citation.id.asc())
+        )
+        .scalars()
+        .all()
+    )
+    citation_by_id = {citation.id: citation for citation in citations}
+    transcript_entry_id_by_id = {transcript.id: transcript.entry_id for transcript in transcripts}
+    links = (
+        session.execute(
+            select(BragBulletCitation)
+            .where(BragBulletCitation.bullet_id.in_([bullet.id for bullet in brag_bullets]))
+            .order_by(BragBulletCitation.created_at.asc(), BragBulletCitation.id.asc())
+        )
+        .scalars()
+        .all()
+        if brag_bullets
+        else []
+    )
+    citations_by_bullet: dict[uuid.UUID, list[dict[str, Any]]] = {}
+    for link in links:
+        citation = citation_by_id.get(link.citation_id)
+        if citation is None:
+            continue
+        entry_id = transcript_entry_id_by_id.get(citation.transcript_id)
+        citations_by_bullet.setdefault(link.bullet_id, []).append(
+            {
+                "id": str(citation.id),
+                "entry_id": str(entry_id) if entry_id else None,
+                "transcript_id": str(citation.transcript_id),
+                "transcript_version": citation.transcript_version,
+                "start_char": citation.start_char,
+                "end_char": citation.end_char,
+                "quote_text": citation.quote_text,
+                "snippet_hash": citation.snippet_hash,
+                "created_at": _isoformat(citation.created_at),
+            }
+        )
+
+    payload_entries = []
+    for entry in entries:
+        payload_entries.append(
+            {
+                "id": str(entry.id),
+                "title": entry.title,
+                "status": entry.status,
+                "entry_type": entry.entry_type,
+                "context": entry.context,
+                "occurred_at": _isoformat(entry.occurred_at),
+                "created_at": _isoformat(entry.created_at),
+                "updated_at": _isoformat(entry.updated_at),
+                "tags": tag_ids_by_entry.get(entry.id, []),
+                "transcripts": [
+                    {
+                        "id": str(transcript.id),
+                        "version": transcript.version,
+                        "is_current": transcript.is_current,
+                        "language_code": transcript.language_code,
+                        "source": transcript.source,
+                        "created_at": _isoformat(transcript.created_at),
+                        "transcript_text": transcript.transcript_text,
+                    }
+                    for transcript in transcripts_by_entry.get(entry.id, [])
+                ],
+                "audio_assets": [
+                    {
+                        "id": str(asset.id),
+                        "storage_key": asset.storage_key,
+                        "mime_type": asset.mime_type,
+                        "size_bytes": asset.size_bytes,
+                        "duration_seconds": str(asset.duration_seconds) if asset.duration_seconds is not None else None,
+                        "sha256_hex": asset.sha256_hex,
+                        "created_at": _isoformat(asset.created_at),
+                    }
+                    for asset in audio_by_entry.get(entry.id, [])
+                ],
+            }
+        )
+
+    payload = {
+        "schema_version": "account_export_v1",
+        "user_id": str(user_id),
+        "exported_at": _isoformat(datetime.now(timezone.utc)),
+        "entries": payload_entries,
+        "tags": [
+            {
+                "id": str(tag.id),
+                "name": tag.name,
+                "normalized_name": tag.normalized_name,
+                "created_at": _isoformat(tag.created_at),
+            }
+            for tag in tags
+        ],
+        "brag": {
+            "bullets": [
+                {
+                    "id": str(bullet.id),
+                    "bucket": bullet.bucket,
+                    "bullet_text": bullet.bullet_text,
+                    "created_at": _isoformat(bullet.created_at),
+                    "updated_at": _isoformat(bullet.updated_at),
+                    "citations": citations_by_bullet.get(bullet.id, []),
+                }
+                for bullet in brag_bullets
+            ]
+        },
+    }
+    return payload, audio_assets
+
+
+def _build_account_export_archive(*, payload: dict[str, Any], audio_assets: list[AudioAsset]) -> bytes:
+    storage = get_storage_backend()
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("export.json", json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True))
+
+        for asset in audio_assets:
+            original_name = os.path.basename(asset.storage_key) or f"{asset.id}.bin"
+            archive_path = f"audio/{asset.entry_id}/{asset.id}-{original_name}"
+            archive.writestr(archive_path, storage.get(asset.storage_key))
+    return buffer.getvalue()
+
+
+def _isoformat(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    return value.isoformat()
 
 
 def _normalize_requested_snippet_ids(snippet_ids: list[str]) -> list[str]:

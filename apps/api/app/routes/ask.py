@@ -14,6 +14,7 @@ from app.jobs import run_ask_summary_job
 from app.models import AskQuery, AskResult, Entry, EntryTag, Tag
 from app.routes.common import resolve_request_user_id
 from app.search_ranking import rank_search_results
+from app.settings import get_summary_generation_disabled_reason, is_summary_generation_enabled
 
 router = APIRouter(prefix="/api/v1/ask", tags=["ask"])
 
@@ -92,6 +93,10 @@ def summarize_ask_query(
     request: Request,
     db: Session = Depends(get_db),
 ) -> dict[str, object]:
+    summary_disabled_reason = get_summary_generation_disabled_reason()
+    if not is_summary_generation_enabled():
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=summary_disabled_reason)
+
     user_id = resolve_request_user_id(request, db)
     ask_query = db.get(AskQuery, query_id)
     if ask_query is None or ask_query.user_id != user_id:
@@ -116,6 +121,7 @@ def get_ask_query(
     include_sensitive: bool = Query(default=False),
     db: Session = Depends(get_db),
 ) -> dict[str, object]:
+    summary_disabled_reason = get_summary_generation_disabled_reason()
     user_id = resolve_request_user_id(request, db)
 
     ask_query = (
@@ -190,4 +196,6 @@ def get_ask_query(
         "summary_status": ask_query.summary_status,
         "summary": ask_query.summary_json,
         "summary_error": ask_query.summary_error,
+        "summary_available": summary_disabled_reason is None,
+        "summary_unavailable_reason": summary_disabled_reason,
     }

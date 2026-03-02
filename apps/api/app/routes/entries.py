@@ -15,9 +15,10 @@ from app.db import get_db
 from app.entry_titles import fallback_entry_title
 from app.jobs import enqueue_registered_job
 from app.errors import ApiContractError, ErrorType
-from app.models import AuditLog, AudioAsset, Entry, EntryTag, Tag, Transcript
+from app.models import AskResult, AuditLog, AudioAsset, BragBulletCitation, Citation, Entry, EntryTag, Tag, Transcript
 from app.routes.common import resolve_request_user_id
 from app.storage import get_storage_backend
+from app.storage.base import StorageNotFoundError
 
 router = APIRouter(prefix="/api/v1/entries", tags=["entries"])
 
@@ -59,6 +60,74 @@ def list_entries() -> dict[str, list[dict[str, str]]]:
 @router.get("/{entry_id}")
 def get_entry(entry_id: uuid.UUID) -> dict[str, str]:
     return {"entry_id": str(entry_id)}
+
+
+@router.delete("/{entry_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_entry(
+    entry_id: uuid.UUID,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> None:
+    user_id = resolve_request_user_id(request, db)
+    entry = db.get(Entry, entry_id)
+    if entry is None or entry.user_id != user_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
+
+    audio_storage_keys = (
+        db.execute(select(AudioAsset.storage_key).where(AudioAsset.entry_id == entry_id)).scalars().all()
+    )
+    transcript_ids = db.execute(select(Transcript.id).where(Transcript.entry_id == entry_id)).scalars().all()
+
+    storage = get_storage_backend()
+    for storage_key in audio_storage_keys:
+        try:
+            storage.delete(storage_key)
+        except StorageNotFoundError:
+            continue
+        except OSError as exc:
+            raise ApiContractError(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                error_code="ENTRY_DELETE_STORAGE_UNAVAILABLE",
+                message="Entry deletion could not remove audio blobs. Retry deletion.",
+                error_type=ErrorType.TRANSIENT,
+            ) from exc
+
+    try:
+        if transcript_ids:
+            db.query(BragBulletCitation).filter(
+                BragBulletCitation.citation_id.in_(
+                    select(Citation.id).where(Citation.transcript_id.in_(transcript_ids))
+                )
+            ).delete(synchronize_session=False)
+            db.query(Citation).filter(Citation.transcript_id.in_(transcript_ids)).delete(synchronize_session=False)
+            db.query(AskResult).filter(AskResult.transcript_id.in_(transcript_ids)).delete(synchronize_session=False)
+
+        db.query(AskResult).filter(AskResult.entry_id == entry_id).delete(synchronize_session=False)
+        db.query(EntryTag).filter(EntryTag.entry_id == entry_id).delete(synchronize_session=False)
+        db.query(AudioAsset).filter(AudioAsset.entry_id == entry_id).delete(synchronize_session=False)
+        db.query(Transcript).filter(Transcript.entry_id == entry_id).delete(synchronize_session=False)
+        db.query(Entry).filter(Entry.id == entry_id).delete(synchronize_session=False)
+        db.add(
+            AuditLog(
+                user_id=user_id,
+                entry_id=None,
+                event_type="entry_deleted",
+                metadata_json={
+                    "deleted_entry_id": str(entry_id),
+                    "audio_asset_count": len(audio_storage_keys),
+                    "transcript_count": len(transcript_ids),
+                },
+            )
+        )
+        db.commit()
+    except SQLAlchemyError as exc:
+        db.rollback()
+        raise ApiContractError(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            error_code="ENTRY_DELETE_FAILED",
+            message="Entry deletion failed due to temporary database issues. Retry deletion.",
+            error_type=ErrorType.TRANSIENT,
+        ) from exc
 
 
 @router.patch("/{entry_id}/transcript")

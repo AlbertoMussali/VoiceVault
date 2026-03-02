@@ -22,6 +22,8 @@ DEFAULT_ENTRY_AUTH_TOKEN = "dev-entry-token"
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_OPENAI_STT_MODEL = "gpt-4o-mini-transcribe"
 DEFAULT_OPENAI_SUMMARY_MODEL = "gpt-4o-mini"
+DEFAULT_REQUIRE_ZERO_RETENTION = False
+DEFAULT_PROVIDER_ZERO_RETENTION_APPROVED = False
 
 
 def get_database_url() -> str:
@@ -55,6 +57,29 @@ class Settings:
     openai_base_url: str
     openai_stt_model: str
     openai_summary_model: str
+    require_zero_retention: bool
+    provider_zero_retention_approved: bool
+
+
+def _read_bool_env(name: str, default: bool) -> bool:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def is_summary_generation_enabled(settings: Settings | None = None) -> bool:
+    current = settings or get_settings()
+    if not current.require_zero_retention:
+        return True
+    return current.provider_zero_retention_approved
+
+
+def get_summary_generation_disabled_reason(settings: Settings | None = None) -> str | None:
+    current = settings or get_settings()
+    if is_summary_generation_enabled(current):
+        return None
+    return "Summary generation is disabled because zero-retention provider approval is required."
 
 
 @lru_cache(maxsize=1)
@@ -75,4 +100,9 @@ def get_settings() -> Settings:
         openai_base_url=os.getenv("OPENAI_BASE_URL", DEFAULT_OPENAI_BASE_URL),
         openai_stt_model=os.getenv("OPENAI_STT_MODEL", DEFAULT_OPENAI_STT_MODEL),
         openai_summary_model=os.getenv("OPENAI_SUMMARY_MODEL", DEFAULT_OPENAI_SUMMARY_MODEL),
+        require_zero_retention=_read_bool_env("REQUIRE_ZERO_RETENTION", DEFAULT_REQUIRE_ZERO_RETENTION),
+        provider_zero_retention_approved=_read_bool_env(
+            "PROVIDER_ZERO_RETENTION_APPROVED",
+            DEFAULT_PROVIDER_ZERO_RETENTION_APPROVED,
+        ),
     )

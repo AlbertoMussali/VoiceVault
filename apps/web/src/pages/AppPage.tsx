@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import { useAuth } from '@/auth/AuthProvider';
 import { AskSummaryRenderer, type AskSummaryCitation, type AskSummarySentence } from '@/components/AskSummaryRenderer';
 import { Button } from '@/components/ui/Button';
+import { deleteAccount } from '@/lib/account';
 import { listBragDrafts, updateBragDraft, type BragDraft } from '@/lib/bragDrafts';
 import {
   downloadBragExportArtifact,
@@ -11,6 +12,12 @@ import {
   requestBragExportJob,
   type BragExportJob
 } from '@/lib/bragExport';
+import {
+  downloadDataExportArtifact,
+  fetchDataExportJob,
+  requestDataExportJob,
+  type DataExportJob
+} from '@/lib/dataExport';
 import {
   EntryApiError,
   createEntry,
@@ -71,8 +78,11 @@ const BRAG_BUCKETS = ['Impact', 'Execution', 'Leadership', 'Collaboration', 'Gro
 const BRAG_UNASSIGNED_BUCKET = 'Unassigned';
 const BRAG_EXPORT_READY_STATUSES = new Set(['completed']);
 const BRAG_EXPORT_FAILED_STATUSES = new Set(['failed', 'error']);
+const DATA_EXPORT_READY_STATUSES = new Set(['completed', 'ready', 'done']);
+const DATA_EXPORT_FAILED_STATUSES = new Set(['failed', 'error', 'fatal']);
 const SENSITIVE_TAG_TOKENS = new Set(['sensitive', 'work_sensitive', 'work-sensitive', 'confidential', 'private', 'raw_only', 'raw-only']);
 const ASK_SUMMARY_SENTENCE_LIMIT = 4;
+const DELETE_ACCOUNT_CONFIRMATION_TEXT = 'DELETE MY ACCOUNT';
 
 function isSensitiveTimelineEntry(entry: TimelineEntryRecord | undefined): boolean {
   if (!entry) {
@@ -417,6 +427,18 @@ export function AppPage() {
   const [isDownloadingBragExport, setIsDownloadingBragExport] = useState(false);
   const [bragExportNotice, setBragExportNotice] = useState<string | null>(null);
   const [bragExportError, setBragExportError] = useState<string | null>(null);
+  const [dataExportJob, setDataExportJob] = useState<DataExportJob | null>(null);
+  const [isRequestingDataExport, setIsRequestingDataExport] = useState(false);
+  const [isCheckingDataExport, setIsCheckingDataExport] = useState(false);
+  const [isDownloadingDataExport, setIsDownloadingDataExport] = useState(false);
+  const [dataExportNotice, setDataExportNotice] = useState<string | null>(null);
+  const [dataExportError, setDataExportError] = useState<string | null>(null);
+  const [deleteAccountPassword, setDeleteAccountPassword] = useState('');
+  const [deleteAccountConfirmationInput, setDeleteAccountConfirmationInput] = useState('');
+  const [deleteAccountAcknowledge, setDeleteAccountAcknowledge] = useState(false);
+  const [isDeletingAccount, setIsDeletingAccount] = useState(false);
+  const [deleteAccountNotice, setDeleteAccountNotice] = useState<string | null>(null);
+  const [deleteAccountError, setDeleteAccountError] = useState<string | null>(null);
   const [searchQueryInput, setSearchQueryInput] = useState('');
   const [submittedSearchQuery, setSubmittedSearchQuery] = useState('');
   const [isSearchLoading, setIsSearchLoading] = useState(false);
@@ -442,6 +464,7 @@ export function AppPage() {
   const [indexTagsInput, setIndexTagsInput] = useState('');
   const pollTimerRef = useRef<number | null>(null);
   const bragExportPollTimerRef = useRef<number | null>(null);
+  const dataExportPollTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     return () => {
@@ -466,6 +489,9 @@ export function AppPage() {
       }
       if (bragExportPollTimerRef.current !== null) {
         window.clearInterval(bragExportPollTimerRef.current);
+      }
+      if (dataExportPollTimerRef.current !== null) {
+        window.clearInterval(dataExportPollTimerRef.current);
       }
     },
     []
@@ -537,6 +563,13 @@ export function AppPage() {
     if (bragExportPollTimerRef.current !== null) {
       window.clearInterval(bragExportPollTimerRef.current);
       bragExportPollTimerRef.current = null;
+    }
+  }
+
+  function stopDataExportPolling() {
+    if (dataExportPollTimerRef.current !== null) {
+      window.clearInterval(dataExportPollTimerRef.current);
+      dataExportPollTimerRef.current = null;
     }
   }
 
@@ -1167,6 +1200,153 @@ export function AppPage() {
     }
   }
 
+  async function loadDataExportStatus(jobId: string, options?: { showCheckingIndicator?: boolean }): Promise<DataExportJob | null> {
+    const showCheckingIndicator = options?.showCheckingIndicator === true;
+
+    if (showCheckingIndicator) {
+      setIsCheckingDataExport(true);
+    }
+
+    try {
+      const job = await fetchDataExportJob(jobId);
+      setDataExportJob(job);
+
+      const normalizedStatus = job.status.trim().toLowerCase();
+      if (DATA_EXPORT_READY_STATUSES.has(normalizedStatus)) {
+        stopDataExportPolling();
+        setDataExportNotice('Data export is ready to download.');
+        setDataExportError(null);
+      } else if (DATA_EXPORT_FAILED_STATUSES.has(normalizedStatus)) {
+        stopDataExportPolling();
+        setDataExportError(job.errorMessage ?? 'Data export failed.');
+      }
+
+      return job;
+    } catch (error) {
+      setDataExportError(error instanceof Error ? error.message : 'Failed to fetch data export status.');
+      return null;
+    } finally {
+      if (showCheckingIndicator) {
+        setIsCheckingDataExport(false);
+      }
+    }
+  }
+
+  function startDataExportPolling(jobId: string) {
+    stopDataExportPolling();
+    dataExportPollTimerRef.current = window.setInterval(() => {
+      void loadDataExportStatus(jobId);
+    }, 3000);
+  }
+
+  async function handleRequestDataExport() {
+    if (isRequestingDataExport || isCheckingDataExport || isDownloadingDataExport) {
+      return;
+    }
+
+    stopDataExportPolling();
+    setIsRequestingDataExport(true);
+    setDataExportNotice(null);
+    setDataExportError(null);
+
+    try {
+      const job = await requestDataExportJob();
+      setDataExportJob(job);
+
+      const normalizedStatus = job.status.trim().toLowerCase();
+      if (DATA_EXPORT_READY_STATUSES.has(normalizedStatus)) {
+        setDataExportNotice('Data export is ready to download.');
+        return;
+      }
+
+      if (DATA_EXPORT_FAILED_STATUSES.has(normalizedStatus)) {
+        setDataExportError(job.errorMessage ?? 'Data export failed.');
+        return;
+      }
+
+      setDataExportNotice('Data export requested. Generating archive now.');
+      startDataExportPolling(job.id);
+    } catch (error) {
+      setDataExportError(error instanceof Error ? error.message : 'Failed to request data export.');
+    } finally {
+      setIsRequestingDataExport(false);
+    }
+  }
+
+  async function handleCheckDataExportStatus() {
+    if (!dataExportJob || isCheckingDataExport || isRequestingDataExport || isDownloadingDataExport) {
+      return;
+    }
+
+    setDataExportNotice(null);
+    await loadDataExportStatus(dataExportJob.id, { showCheckingIndicator: true });
+  }
+
+  async function handleDownloadDataExport() {
+    if (!dataExportJob || isDownloadingDataExport || isRequestingDataExport || isCheckingDataExport) {
+      return;
+    }
+
+    setIsDownloadingDataExport(true);
+    setDataExportError(null);
+
+    try {
+      const normalizedStatus = dataExportJob.status.trim().toLowerCase();
+      const latest =
+        DATA_EXPORT_READY_STATUSES.has(normalizedStatus)
+          ? dataExportJob
+          : await loadDataExportStatus(dataExportJob.id, { showCheckingIndicator: false });
+
+      if (!latest || !DATA_EXPORT_READY_STATUSES.has(latest.status.trim().toLowerCase())) {
+        setDataExportError('Data export is not ready yet.');
+        return;
+      }
+
+      await downloadDataExportArtifact(latest);
+      setDataExportNotice('Download started.');
+    } catch (error) {
+      setDataExportError(error instanceof Error ? error.message : 'Failed to download data export.');
+    } finally {
+      setIsDownloadingDataExport(false);
+    }
+  }
+
+  async function handleDeleteAccount(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    const password = deleteAccountPassword.trim();
+    const confirmation = deleteAccountConfirmationInput.trim();
+    if (!password) {
+      setDeleteAccountError('Enter your password to confirm account deletion.');
+      setDeleteAccountNotice(null);
+      return;
+    }
+    if (confirmation !== DELETE_ACCOUNT_CONFIRMATION_TEXT) {
+      setDeleteAccountError(`Type "${DELETE_ACCOUNT_CONFIRMATION_TEXT}" exactly to continue.`);
+      setDeleteAccountNotice(null);
+      return;
+    }
+    if (!deleteAccountAcknowledge) {
+      setDeleteAccountError('Confirm that you understand this action is permanent.');
+      setDeleteAccountNotice(null);
+      return;
+    }
+
+    setIsDeletingAccount(true);
+    setDeleteAccountError(null);
+    setDeleteAccountNotice(null);
+    try {
+      await deleteAccount({ password });
+      setDeleteAccountNotice('Account deleted. Redirecting to login.');
+      await logoutCurrentUser();
+      navigate('/login', { replace: true });
+    } catch (error) {
+      setDeleteAccountError(error instanceof Error ? error.message : 'Failed to delete account.');
+    } finally {
+      setIsDeletingAccount(false);
+    }
+  }
+
   const isBusy = pipelineState === 'creating' || pipelineState === 'uploading' || pipelineState === 'transcribing';
   const currentIndexing = entryId ? indexingByEntry[entryId] : null;
   const retryLabel =
@@ -1341,6 +1521,14 @@ export function AppPage() {
   );
   const bragExportStatusLabel = bragExportJob?.status ?? null;
   const isBragExportReady = BRAG_EXPORT_READY_STATUSES.has((bragExportJob?.status ?? '').trim().toLowerCase());
+  const dataExportStatusLabel = dataExportJob?.status ?? null;
+  const isDataExportReady = DATA_EXPORT_READY_STATUSES.has((dataExportJob?.status ?? '').trim().toLowerCase());
+  const isDeleteAccountConfirmationValid = deleteAccountConfirmationInput.trim() === DELETE_ACCOUNT_CONFIRMATION_TEXT;
+  const canSubmitDeleteAccount =
+    deleteAccountPassword.trim().length > 0 &&
+    isDeleteAccountConfirmationValid &&
+    deleteAccountAcknowledge &&
+    !isDeletingAccount;
 
   function openAskCitation(citation: AskSummaryCitation) {
     const params = new URLSearchParams({
@@ -1357,8 +1545,15 @@ export function AppPage() {
   return (
     <main className="min-h-screen bg-gradient-to-br from-sky-50 via-cyan-50 to-emerald-100 p-6">
       <section className="mx-auto mt-12 w-full max-w-2xl rounded-lg border bg-card p-8 text-card-foreground shadow-sm">
-        <h1 className="text-2xl font-semibold tracking-tight">VoiceVault App</h1>
-        <p className="mt-2 text-sm text-muted-foreground">Authenticated session is active.</p>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h1 className="text-2xl font-semibold tracking-tight">VoiceVault App</h1>
+            <p className="mt-2 text-sm text-muted-foreground">Authenticated session is active.</p>
+          </div>
+          <Button variant="outline" size="sm" onClick={() => navigate('/app/audit')}>
+            Open audit log
+          </Button>
+        </div>
         <dl className="mt-6 rounded-md border bg-background p-4 text-sm">
           <div className="flex justify-between gap-3">
             <dt className="text-muted-foreground">Email</dt>
@@ -1784,6 +1979,98 @@ export function AppPage() {
             >
               Preview payload
             </Button>
+          </div>
+        </div>
+        <div className="mt-6 space-y-4 rounded-md border bg-background p-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h2 className="text-base font-semibold">Data export</h2>
+            <span className="text-xs text-muted-foreground">Privacy and portability</span>
+          </div>
+          <p className="text-sm text-muted-foreground">Request a full account export, check status, and download the archive when it is ready.</p>
+          <div className="rounded-md border border-emerald-200 bg-emerald-50 p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h3 className="text-sm font-semibold text-emerald-900">Export all data</h3>
+              {dataExportStatusLabel ? (
+                <span className="rounded-full border border-emerald-300 bg-white px-2 py-1 text-xs font-medium text-emerald-900">
+                  Status: {dataExportStatusLabel}
+                </span>
+              ) : null}
+            </div>
+            <p className="mt-1 text-xs text-emerald-900/80">Includes transcripts, tags, brag bullets, and uploaded audio assets.</p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Button onClick={handleRequestDataExport} disabled={isRequestingDataExport || isCheckingDataExport || isDownloadingDataExport}>
+                {isRequestingDataExport ? 'Requesting export...' : 'Request export'}
+              </Button>
+              <Button
+                onClick={handleCheckDataExportStatus}
+                variant="outline"
+                disabled={!dataExportJob || isRequestingDataExport || isCheckingDataExport || isDownloadingDataExport}
+              >
+                {isCheckingDataExport ? 'Checking status...' : 'Check status'}
+              </Button>
+              <Button
+                onClick={handleDownloadDataExport}
+                variant="outline"
+                disabled={!dataExportJob || !isDataExportReady || isRequestingDataExport || isCheckingDataExport || isDownloadingDataExport}
+              >
+                {isDownloadingDataExport ? 'Downloading...' : 'Download export'}
+              </Button>
+            </div>
+            {dataExportJob ? <p className="mt-2 text-xs text-emerald-900/80">Job ID: <span className="font-mono">{dataExportJob.id}</span></p> : null}
+            {dataExportNotice ? <p className="mt-2 text-xs text-emerald-700">{dataExportNotice}</p> : null}
+            {dataExportError ? <p className="mt-2 text-xs text-destructive">{dataExportError}</p> : null}
+          </div>
+          <div className="rounded-md border border-red-200 bg-red-50 p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h3 className="text-sm font-semibold text-red-900">Delete account</h3>
+              <span className="rounded-full border border-red-300 bg-white px-2 py-1 text-xs font-medium text-red-900">Permanent</span>
+            </div>
+            <p className="mt-1 text-xs text-red-900/85">
+              This permanently deletes your account, audio files, transcripts, tags, exports, and saved drafts. This action cannot be undone.
+            </p>
+            <ul className="mt-2 list-disc space-y-1 pl-5 text-xs text-red-900/85">
+              <li>Export your data before deleting so you keep a copy.</li>
+              <li>Deletion signs you out on this device.</li>
+              <li>Recovery is not possible after confirmation.</li>
+            </ul>
+            <form className="mt-3 space-y-3" onSubmit={handleDeleteAccount}>
+              <label className="space-y-1 text-sm">
+                <span className="font-medium text-red-900">Current password</span>
+                <input
+                  type="password"
+                  autoComplete="current-password"
+                  value={deleteAccountPassword}
+                  onChange={(event) => setDeleteAccountPassword(event.target.value)}
+                  className="w-full rounded-md border border-red-200 bg-white px-3 py-2 text-sm"
+                  disabled={isDeletingAccount}
+                />
+              </label>
+              <label className="space-y-1 text-sm">
+                <span className="font-medium text-red-900">Type {DELETE_ACCOUNT_CONFIRMATION_TEXT}</span>
+                <input
+                  type="text"
+                  value={deleteAccountConfirmationInput}
+                  onChange={(event) => setDeleteAccountConfirmationInput(event.target.value)}
+                  className="w-full rounded-md border border-red-200 bg-white px-3 py-2 font-mono text-sm"
+                  disabled={isDeletingAccount}
+                />
+              </label>
+              <label className="flex items-start gap-2 text-xs text-red-900">
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  checked={deleteAccountAcknowledge}
+                  onChange={(event) => setDeleteAccountAcknowledge(event.target.checked)}
+                  disabled={isDeletingAccount}
+                />
+                <span>I understand this is irreversible and permanently removes my data.</span>
+              </label>
+              <Button type="submit" disabled={!canSubmitDeleteAccount} className="bg-red-700 text-white hover:bg-red-800">
+                {isDeletingAccount ? 'Deleting account...' : 'Delete account permanently'}
+              </Button>
+            </form>
+            {deleteAccountNotice ? <p className="mt-2 text-xs text-emerald-700">{deleteAccountNotice}</p> : null}
+            {deleteAccountError ? <p className="mt-2 text-xs text-destructive">{deleteAccountError}</p> : null}
           </div>
         </div>
         <div className="mt-6 space-y-4 rounded-md border bg-background p-4">

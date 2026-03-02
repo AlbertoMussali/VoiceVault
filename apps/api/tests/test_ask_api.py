@@ -25,6 +25,8 @@ class AskApiTests(unittest.TestCase):
     def setUp(self) -> None:
         self.original_database_url = os.environ.get("DATABASE_URL")
         self.original_entry_auth_token = os.environ.get("ENTRY_AUTH_TOKEN")
+        self.original_require_zero_retention = os.environ.get("REQUIRE_ZERO_RETENTION")
+        self.original_provider_zero_retention_approved = os.environ.get("PROVIDER_ZERO_RETENTION_APPROVED")
 
         self.temp_dir = tempfile.TemporaryDirectory()
         os.environ["DATABASE_URL"] = f"sqlite+pysqlite:///{self.temp_dir.name}/ask_api.db"
@@ -49,6 +51,14 @@ class AskApiTests(unittest.TestCase):
             os.environ.pop("ENTRY_AUTH_TOKEN", None)
         else:
             os.environ["ENTRY_AUTH_TOKEN"] = self.original_entry_auth_token
+        if self.original_require_zero_retention is None:
+            os.environ.pop("REQUIRE_ZERO_RETENTION", None)
+        else:
+            os.environ["REQUIRE_ZERO_RETENTION"] = self.original_require_zero_retention
+        if self.original_provider_zero_retention_approved is None:
+            os.environ.pop("PROVIDER_ZERO_RETENTION_APPROVED", None)
+        else:
+            os.environ["PROVIDER_ZERO_RETENTION_APPROVED"] = self.original_provider_zero_retention_approved
 
         self.temp_dir.cleanup()
         get_settings.cache_clear()
@@ -110,6 +120,13 @@ class AskApiTests(unittest.TestCase):
             return entry.id, transcript.id
         finally:
             session.close()
+
+    def _reload_runtime_settings(self) -> None:
+        self.client.close()
+        get_settings.cache_clear()
+        reset_engine_cache()
+        self.client = TestClient(create_app())
+        self.client.get("/health")
 
     def test_ask_query_returns_sources_and_persists_query_and_results(self) -> None:
         self._create_entry_with_current_transcript(
@@ -478,6 +495,67 @@ class AskApiTests(unittest.TestCase):
 
         self.assertEqual(summarize_response.status_code, 422)
         self.assertIn("uncited", summarize_response.json()["detail"])
+
+    def test_ask_summarize_is_disabled_when_zero_retention_is_required_but_not_approved(self) -> None:
+        self._create_entry_with_current_transcript(self.user_id, "Blocker persisted due to deploy failures.")
+        query_response = self.client.post(
+            "/api/v1/ask/query",
+            json={"query_text": "blocker", "limit": 5},
+            headers=self._auth_headers(),
+        )
+        self.assertEqual(query_response.status_code, 200)
+        query_id = query_response.json()["query_id"]
+
+        os.environ["REQUIRE_ZERO_RETENTION"] = "true"
+        os.environ["PROVIDER_ZERO_RETENTION_APPROVED"] = "false"
+        self._reload_runtime_settings()
+
+        summarize_response = self.client.post(
+            f"/api/v1/ask/{query_id}/summarize",
+            json={},
+            headers=self._auth_headers(),
+        )
+        self.assertEqual(summarize_response.status_code, 403)
+        self.assertIn("zero-retention provider approval is required", summarize_response.json()["detail"])
+
+        ask_payload = self.client.get(f"/api/v1/ask/{query_id}", headers=self._auth_headers())
+        self.assertEqual(ask_payload.status_code, 200)
+        ask_body = ask_payload.json()
+        self.assertFalse(ask_body["summary_available"])
+        self.assertIn("zero-retention provider approval is required", ask_body["summary_unavailable_reason"])
+
+    def test_ask_summarize_allows_generation_when_zero_retention_requirement_is_met(self) -> None:
+        self._create_entry_with_current_transcript(self.user_id, "Deployment blocker improved after runbook update.")
+        query_response = self.client.post(
+            "/api/v1/ask/query",
+            json={"query_text": "blocker", "limit": 5},
+            headers=self._auth_headers(),
+        )
+        self.assertEqual(query_response.status_code, 200)
+        body = query_response.json()
+        query_id = body["query_id"]
+        valid_snippet_id = body["sources"][0]["id"]
+
+        os.environ["REQUIRE_ZERO_RETENTION"] = "true"
+        os.environ["PROVIDER_ZERO_RETENTION_APPROVED"] = "true"
+        self._reload_runtime_settings()
+
+        with patch(
+            "app.jobs.generate_summary_sentences",
+            return_value=[
+                AskSummarySentence(
+                    text="The blocker was reduced by standardizing deployment steps.",
+                    snippet_ids=[valid_snippet_id],
+                )
+            ],
+        ):
+            summarize_response = self.client.post(
+                f"/api/v1/ask/{query_id}/summarize",
+                json={"snippet_ids": [valid_snippet_id]},
+                headers=self._auth_headers(),
+            )
+        self.assertEqual(summarize_response.status_code, 200)
+        self.assertEqual(summarize_response.json()["summary_status"], "done")
 
 
 if __name__ == "__main__":

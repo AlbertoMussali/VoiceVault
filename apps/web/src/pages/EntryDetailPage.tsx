@@ -3,7 +3,7 @@ import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 
 import { Button } from '@/components/ui/Button';
 import { createBragDraftFromSnippet } from '@/lib/bragDrafts';
-import { EntryApiError, fetchEntryAudioBlob, fetchEntryDetail, type EntryDetail } from '@/lib/entries';
+import { EntryApiError, deleteEntry, fetchEntryAudioBlob, fetchEntryDetail, type EntryDetail } from '@/lib/entries';
 
 type AudioState = {
   src: string | null;
@@ -57,6 +57,22 @@ function buildEntryErrorMessage(error: unknown): string {
   }
 
   return 'Failed to load entry details.';
+}
+
+function buildDeleteErrorMessage(error: unknown): string {
+  if (error instanceof EntryApiError) {
+    if (error.status === 404) {
+      return 'Entry not found. It may already be deleted.';
+    }
+
+    return error.message;
+  }
+
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  return 'Failed to delete entry.';
 }
 
 function normalizeSnippetText(value: string): string {
@@ -117,6 +133,9 @@ export function EntryDetailPage() {
   const [selectedSnippet, setSelectedSnippet] = useState<TranscriptSnippet | null>(null);
   const [bragNotice, setBragNotice] = useState<string | null>(null);
   const [bragError, setBragError] = useState<string | null>(null);
+  const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
+  const [isDeletingEntry, setIsDeletingEntry] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const transcriptRef = useRef<HTMLElement | null>(null);
   const highlightRef = useRef<HTMLElement | null>(null);
 
@@ -292,14 +311,45 @@ export function EntryDetailPage() {
     }
   }
 
+  async function handleConfirmDelete() {
+    if (!entry || isDeletingEntry) {
+      return;
+    }
+
+    setIsDeletingEntry(true);
+    setDeleteError(null);
+    try {
+      await deleteEntry(entry.entryId);
+      navigate('/app');
+    } catch (error) {
+      setDeleteError(buildDeleteErrorMessage(error));
+    } finally {
+      setIsDeletingEntry(false);
+    }
+  }
+
   return (
     <main className="min-h-screen bg-gradient-to-br from-sky-50 via-cyan-50 to-emerald-100 p-6">
       <section className="mx-auto mt-12 w-full max-w-3xl rounded-lg border bg-card p-8 text-card-foreground shadow-sm">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <h1 className="text-2xl font-semibold tracking-tight">Entry Detail</h1>
-          <Button onClick={() => navigate('/app')} variant="outline">
-            Back to app
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            {entry && !errorMessage ? (
+              <Button
+                onClick={() => {
+                  setDeleteError(null);
+                  setIsDeleteModalOpen(true);
+                }}
+                variant="outline"
+                className="border-destructive/50 text-destructive hover:bg-destructive/10 hover:text-destructive"
+              >
+                Delete entry
+              </Button>
+            ) : null}
+            <Button onClick={() => navigate('/app')} variant="outline">
+              Back to app
+            </Button>
+          </div>
         </div>
 
         {isLoading ? <p className="mt-4 text-sm text-muted-foreground">Loading entry...</p> : null}
@@ -379,6 +429,49 @@ export function EntryDetailPage() {
           </>
         ) : null}
       </section>
+      {isDeleteModalOpen && entry ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4" role="presentation">
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-entry-title"
+            className="w-full max-w-lg rounded-lg border bg-card p-6 text-card-foreground shadow-lg"
+          >
+            <h2 id="delete-entry-title" className="text-lg font-semibold text-destructive">
+              Delete entry permanently?
+            </h2>
+            <p className="mt-2 text-sm text-muted-foreground">
+              This action is irreversible. Audio, transcript versions, and linked evidence will be removed.
+            </p>
+            <p className="mt-2 rounded-md border bg-muted/20 p-2 text-xs font-mono">{entry.entryId}</p>
+            {deleteError ? <p className="mt-3 text-sm text-destructive">{deleteError}</p> : null}
+            <div className="mt-5 flex flex-wrap justify-end gap-2">
+              <Button
+                variant="outline"
+                onClick={() => {
+                  if (isDeletingEntry) {
+                    return;
+                  }
+                  setIsDeleteModalOpen(false);
+                  setDeleteError(null);
+                }}
+                disabled={isDeletingEntry}
+              >
+                Cancel
+              </Button>
+              <Button
+                onClick={() => {
+                  void handleConfirmDelete();
+                }}
+                disabled={isDeletingEntry}
+                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              >
+                {isDeletingEntry ? 'Deleting...' : 'Yes, delete entry'}
+              </Button>
+            </div>
+          </section>
+        </div>
+      ) : null}
     </main>
   );
 }

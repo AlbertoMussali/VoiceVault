@@ -221,25 +221,25 @@ Notes:
 
 ## Phase 7 — Production controls: export, deletion, audit, retention gating
 
-- [ ] [BE] Implement export-all job (zip: JSON + transcripts all versions + tags + brag + audio blobs). <!-- group: 800 -->
+- [x] [BE] Implement export-all job (zip: JSON + transcripts all versions + tags + brag + audio blobs). <!-- group: 800 -->
   - Done when: zip contents match spec and restore is feasible.
-- [ ] [FE] Implement data export UI (request + status + download). <!-- group: 800 -->
+- [x] [FE] Implement data export UI (request + status + download). <!-- group: 800 -->
   - Done when: export flows without admin intervention.
-- [ ] [BE] Implement entry deletion with cascade + blob cleanup + audit event. <!-- group: 800 -->
+- [x] [BE] Implement entry deletion with cascade + blob cleanup + audit event. <!-- group: 800 -->
   - Done when: no orphan blobs/rows remain.
-- [ ] [FE] Implement delete-entry UX (explicit confirmation). <!-- group: 800 -->
+- [x] [FE] Implement delete-entry UX (explicit confirmation). <!-- group: 800 -->
   - Done when: prevents accidental deletion; communicates finality.
-- [ ] [BE] Implement delete-account full wipe (password confirm, revoke tokens, delete blobs). <!-- group: 800 -->
+- [x] [BE] Implement delete-account full wipe (password confirm, revoke tokens, delete blobs). <!-- group: 800 -->
   - Done when: user data is actually removed; audit records are content-free.
-- [ ] [FE] Implement delete-account UX with typed confirmation + warnings. <!-- group: 800 -->
+- [x] [FE] Implement delete-account UX with typed confirmation + warnings. <!-- group: 800 -->
   - Done when: user understands irreversible action.
-- [ ] [BE] Implement audit endpoint with pagination. <!-- group: 800 -->
+- [x] [BE] Implement audit endpoint with pagination. <!-- group: 800 -->
   - Done when: supports viewing processing events without leaking content.
-- [ ] [FE] Implement audit log page. <!-- group: 800 -->
+- [x] [FE] Implement audit log page. <!-- group: 800 -->
   - Done when: user can review processing history.
-- [ ] [INF] Implement “zero retention required” runtime gate for summary features. <!-- group: 800 -->
+- [x] [INF] Implement “zero retention required” runtime gate for summary features. <!-- group: 800 -->
   - Done when: summaries disable cleanly if requirement not met; sources-only still works.
-- [ ] [QA] Add data rights tests (export contents; delete removes blobs/rows). <!-- group: 800 -->
+- [x] [QA] Add data rights tests (export contents; delete removes blobs/rows). <!-- group: 800 -->
   - Done when: deterministic tests prove compliance behaviors.
 
 ## Phase 8 — Production readiness V1: observability, security, deployment, QA gates
