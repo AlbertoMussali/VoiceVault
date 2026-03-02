@@ -13,12 +13,18 @@ record_orchestrator_event() {
   local group="$3"
   local status="$4"
   local details="${5:-{}}"
+  local safe_details="$details"
+
+  # Never let malformed details crash the run lifecycle.
+  if ! jq -e . >/dev/null 2>&1 <<<"$details"; then
+    safe_details=$(jq -nc --arg details_raw "$details" '{detail_raw:$details_raw}')
+  fi
 
   jq -nc \
     --arg run_id "$run_id" \
     --arg group "$group" \
     --arg status "$status" \
-    --argjson details "$details" \
+    --argjson details "$safe_details" \
     '{ts:now|todateiso8601, run_id:$run_id, group:$group, status:$status} + $details' >>"$jobs_file"
 }
 
