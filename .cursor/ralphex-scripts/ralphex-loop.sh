@@ -75,6 +75,11 @@ else
 fi
 
 show_banner
+ui_live_init
+trap 'ui_live_stop' EXIT
+
+run_header_id="${RESUME_RUN_ID:-$(date '+%Y%m%d%H%M%S')}"
+export RALPHEX_RUN_ID_HINT="$run_header_id"
 
 if ! check_prerequisites "$WORKSPACE"; then
   exit 1
@@ -93,7 +98,6 @@ else
   BASE_BRANCH="$(git -C "$WORKSPACE" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
 fi
 
-run_header_id="${RESUME_RUN_ID:-$(date '+%Y%m%d%H%M%S')}"
 run_mode="sequential"
 if [[ "$PARALLEL_MODE" == true && -n "$RESUME_RUN_ID" ]]; then
   run_mode="parallel-resume"
@@ -103,6 +107,7 @@ fi
 ui_print_run_header "$WORKSPACE" "$run_header_id" "$BASE_BRANCH" "$run_mode" "$MODEL" "$SANDBOX"
 ui_print_task_inventory "$WORKSPACE"
 _ui_prefix "Plan" "Max iterations: $MAX_ITERATIONS | Max parallel: $MAX_PARALLEL"
+ui_live_update "plan" "run_id=$run_header_id mode=$run_mode model=$MODEL"
 
 acquire_lock() {
   local workspace="$1"
@@ -173,7 +178,7 @@ if [[ "$SKIP_CONFIRM" != true ]]; then
   fi
 fi
 
-if [[ "$PARALLEL_MODE" == true ]]; then
+  if [[ "$PARALLEL_MODE" == true ]]; then
   # Fail fast on dirty workspace so worktrees are created from a committed baseline.
   if ! git -C "$WORKSPACE" rev-parse --git-dir >/dev/null 2>&1; then
     echo "Parallel mode requires a git repository." >&2
@@ -207,7 +212,7 @@ if [[ "$PARALLEL_MODE" == true ]]; then
     exit 4
   fi
 
-  run_id=$(date '+%Y%m%d%H%M%S')
+  run_id="$run_header_id"
   acquire_lock "$WORKSPACE" "$run_id" "parallel" || exit 3
 
   run_parallel_tasks "$WORKSPACE" "$MAX_PARALLEL" "${USE_BRANCH:-}" "$MAX_ITERATIONS" "$run_id" "$BASE_BRANCH"
@@ -218,7 +223,7 @@ if [[ "$PARALLEL_MODE" == true ]]; then
     echo "Parallel run failed at group barrier orchestrator. Resume with: ./ralphex-loop.sh --parallel --resume-run $run_id -y" >&2
   fi
 else
-  run_id=$(date '+%Y%m%d%H%M%S')
+  run_id="$run_header_id"
   acquire_lock "$WORKSPACE" "$run_id" "sequential-grouped" || exit 3
   run_parallel_tasks "$WORKSPACE" "1" "" "$MAX_ITERATIONS" "$run_id" "$BASE_BRANCH"
   rc=$?

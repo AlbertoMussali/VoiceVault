@@ -22,6 +22,19 @@ _run_log_json() {
   jq -nc "$@" >>"$jobs_file"
 }
 
+_progress_event() {
+  local status_dir="$1"
+  local run_id="$2"
+  local group="$3"
+  local task_id="$4"
+  local stage="$5"
+  local event="$6"
+  local level="$7"
+  local message="$8"
+  local meta_json="${9:-{}}"
+  ui_emit_standard_event "$status_dir" "$run_id" "$group" "$task_id" "$stage" "$event" "$level" "$message" "$meta_json" || true
+}
+
 _read_agents_md_snippet() {
   local dir="$1"
   local f="$dir/AGENTS.md"
@@ -94,10 +107,15 @@ _run_agent_in_worktree() {
   mkdir -p "$wt_base" "$status_dir"
 
   local branch="ralphex/parallel-${run_id}-${job_id}-${task_id}-$(slugify "$task_desc")"
+  local task_group=""
+  local task_row
+  task_row=$(get_task_by_id "$workspace" "$task_id" || true)
+  task_group=$(echo "$task_row" | cut -d'|' -f3)
 
   if ! git -C "$workspace" worktree add -f -b "$branch" "$wt_dir" "$base_ref" > "$log_file" 2>&1; then
     echo "FAILED|$task_id|$branch|$wt_dir|worktree_create" > "$status_file"
     _run_log_json "$jobs_file" --arg run_id "$run_id" --arg job_id "$job_id" --arg task_id "$task_id" --arg branch "$branch" --arg status "FAILED" --arg reason "worktree_create" '{ts:now|todateiso8601, run_id:$run_id, job_id:($job_id|tonumber), task_id:$task_id, branch:$branch, status:$status, reason:$reason}'
+    _progress_event "$status_dir" "$run_id" "$task_group" "$task_id" "task" "TASK_RESULT" "error" "task failed: worktree create"
     return 0
   fi
 
@@ -144,13 +162,22 @@ EOT
 )
 
   _run_log_json "$jobs_file" --arg run_id "$run_id" --arg job_id "$job_id" --arg task_id "$task_id" --arg branch "$branch" --arg status "JOB_STARTED" --arg tools "$tools_required" --arg test "$requested_test" '{ts:now|todateiso8601, run_id:$run_id, job_id:($job_id|tonumber), task_id:$task_id, branch:$branch, status:$status, tools:$tools, test:$test}'
+  _progress_event "$status_dir" "$run_id" "$task_group" "$task_id" "task" "TASK_STARTED" "info" "task started" "$(jq -nc --arg branch "$branch" --arg tools "$tools_required" --arg test "$requested_test" '{branch:$branch,tools:$tools,test:$test}')"
 
   set +e
   (
     cd "$wt_dir" || exit 1
     codex exec --json --sandbox "$SANDBOX" --model "$MODEL" "$prompt"
-  ) >> "$log_file" 2>&1
-  local rc=$?
+  ) 2>&1 \
+    | tee -a "$log_file" \
+    | RALPHEX_STREAM_STATUS_DIR="$status_dir" \
+      RALPHEX_STREAM_RUN_ID="$run_id" \
+      RALPHEX_STREAM_GROUP="$task_group" \
+      RALPHEX_STREAM_TASK_ID="$task_id" \
+      RALPHEX_STREAM_STAGE="task" \
+      RALPHEX_REASONING_SUMMARY="${RALPHEX_REASONING_SUMMARY:-1}" \
+      "$SCRIPT_DIR/ralphex-stream-parser.sh" "$wt_dir" >/dev/null
+  local rc=${PIPESTATUS[0]}
   set -e
 
   if [[ "$rc" -eq 0 ]]; then
@@ -166,6 +193,7 @@ EOT
         if ! git -C "$wt_dir" -c user.name="ralphex" -c user.email="ralphex@local" commit -m "ralphex: complete $task_id" >> "$log_file" 2>&1; then
           echo "FAILED|$task_id|$branch|$wt_dir|commit_failed" > "$status_file"
           _run_log_json "$jobs_file" --arg run_id "$run_id" --arg job_id "$job_id" --arg task_id "$task_id" --arg branch "$branch" --arg status "JOB_FAILED" --arg reason "commit_failed" '{ts:now|todateiso8601, run_id:$run_id, job_id:($job_id|tonumber), task_id:$task_id, branch:$branch, status:$status, reason:$reason}'
+          _progress_event "$status_dir" "$run_id" "$task_group" "$task_id" "task" "TASK_RESULT" "error" "task failed: commit failed" "$(jq -nc --arg reason "commit_failed" '{reason:$reason}')"
           return 0
         fi
       fi
@@ -175,9 +203,11 @@ EOT
     sha=$(git -C "$wt_dir" rev-parse HEAD 2>/dev/null || echo "")
     echo "SUCCESS|$task_id|$branch|$wt_dir|ok|$sha|$tools_required|$requested_test" > "$status_file"
     _run_log_json "$jobs_file" --arg run_id "$run_id" --arg job_id "$job_id" --arg task_id "$task_id" --arg branch "$branch" --arg status "JOB_SUCCESS" --arg sha "$sha" '{ts:now|todateiso8601, run_id:$run_id, job_id:($job_id|tonumber), task_id:$task_id, branch:$branch, status:$status, sha:$sha}'
+    _progress_event "$status_dir" "$run_id" "$task_group" "$task_id" "task" "TASK_RESULT" "info" "task completed" "$(jq -nc --arg branch "$branch" --arg sha "$sha" '{branch:$branch,sha:$sha}')"
   else
     echo "FAILED|$task_id|$branch|$wt_dir|codex_failed" > "$status_file"
     _run_log_json "$jobs_file" --arg run_id "$run_id" --arg job_id "$job_id" --arg task_id "$task_id" --arg branch "$branch" --arg status "JOB_FAILED" --arg reason "codex_failed" '{ts:now|todateiso8601, run_id:$run_id, job_id:($job_id|tonumber), task_id:$task_id, branch:$branch, status:$status, reason:$reason}'
+    _progress_event "$status_dir" "$run_id" "$task_group" "$task_id" "task" "TASK_RESULT" "error" "task failed: codex failed" "$(jq -nc --arg reason "codex_failed" '{reason:$reason}')"
   fi
 
   return 0
@@ -219,6 +249,10 @@ _auto_resolve_merge_conflict() {
   status_dir="$(ralphex_state_dir "$workspace")/parallel/$run_id"
   local merge_log="$status_dir/merge.log"
   local jobs_file="$status_dir/jobs.jsonl"
+  local task_group=""
+  local task_row
+  task_row=$(get_task_by_id "$workspace" "$task_id" || true)
+  task_group=$(echo "$task_row" | cut -d'|' -f3)
 
   local mergefix_branch="ralphex/mergefix-${run_id}-${task_id}"
   local fix_dir
@@ -226,6 +260,7 @@ _auto_resolve_merge_conflict() {
   mkdir -p "$(dirname "$fix_dir")"
 
   _run_log_json "$jobs_file" --arg run_id "$run_id" --arg task_id "$task_id" --arg branch "$task_branch" --arg status "MERGE_FIX_STARTED" '{ts:now|todateiso8601, run_id:$run_id, task_id:$task_id, branch:$branch, status:$status}'
+  _progress_event "$status_dir" "$run_id" "$task_group" "$task_id" "merge_fix" "MERGE_FIX_STARTED" "warn" "merge-fix started" "$(jq -nc --arg branch "$task_branch" '{branch:$branch}')"
 
   local has_fix_worktree="false"
   if git -C "$workspace" worktree list --porcelain | awk '/^worktree /{print substr($0,10)}' | grep -Fxq "$fix_dir"; then
@@ -236,11 +271,13 @@ _auto_resolve_merge_conflict() {
     if git -C "$workspace" show-ref --verify --quiet "refs/heads/$mergefix_branch"; then
       if ! git -C "$workspace" worktree add -f "$fix_dir" "$mergefix_branch" >>"$merge_log" 2>&1; then
         echo "merge-fix worktree attach failed for $mergefix_branch" >>"$merge_log"
+        _progress_event "$status_dir" "$run_id" "$task_group" "$task_id" "merge_fix" "MERGE_FIX_FAILED" "error" "merge-fix failed: worktree attach failed"
         return 1
       fi
     else
       if ! git -C "$workspace" worktree add -f -b "$mergefix_branch" "$fix_dir" "$integration_branch" >>"$merge_log" 2>&1; then
         echo "merge-fix worktree create failed for $mergefix_branch" >>"$merge_log"
+        _progress_event "$status_dir" "$run_id" "$task_group" "$task_id" "merge_fix" "MERGE_FIX_FAILED" "error" "merge-fix failed: worktree create failed"
         return 1
       fi
     fi
@@ -256,13 +293,16 @@ _auto_resolve_merge_conflict() {
     git clean -fd >/dev/null 2>&1
   ) >>"$merge_log" 2>&1; then
     echo "merge-fix baseline reset failed for $mergefix_branch" >>"$merge_log"
+    _progress_event "$status_dir" "$run_id" "$task_group" "$task_id" "merge_fix" "MERGE_FIX_FAILED" "error" "merge-fix failed: baseline reset failed"
     return 1
   fi
+  _progress_event "$status_dir" "$run_id" "$task_group" "$task_id" "merge_fix" "MERGE_FIX_PROGRESS" "info" "merge-fix baseline prepared"
 
   set +e
   (cd "$fix_dir" && git merge "$task_branch") >>"$merge_log" 2>&1
   local merge_rc=$?
   set -e
+  _progress_event "$status_dir" "$run_id" "$task_group" "$task_id" "merge_fix" "MERGE_FIX_PROGRESS" "info" "merge-fix merge attempted"
 
   if [[ "$merge_rc" -ne 0 ]]; then
     local conflicts
@@ -294,13 +334,26 @@ EOT
 )
 
     set +e
-    (cd "$fix_dir" && codex exec --json --sandbox "$SANDBOX" --model "$MODEL" "$prompt") >>"$merge_log" 2>&1
-    local rc=$?
+    (
+      cd "$fix_dir" || exit 1
+      codex exec --json --sandbox "$SANDBOX" --model "$MODEL" "$prompt"
+    ) 2>&1 \
+      | tee -a "$merge_log" \
+      | RALPHEX_STREAM_STATUS_DIR="$status_dir" \
+        RALPHEX_STREAM_RUN_ID="$run_id" \
+        RALPHEX_STREAM_GROUP="$task_group" \
+        RALPHEX_STREAM_TASK_ID="$task_id" \
+        RALPHEX_STREAM_STAGE="merge_fix" \
+        RALPHEX_REASONING_SUMMARY="${RALPHEX_REASONING_SUMMARY:-1}" \
+        "$SCRIPT_DIR/ralphex-stream-parser.sh" "$fix_dir" >/dev/null
+    local rc=${PIPESTATUS[0]}
     set -e
     if [[ "$rc" -ne 0 ]]; then
       echo "merge-fix codex failed for $mergefix_branch" >>"$merge_log"
+      _progress_event "$status_dir" "$run_id" "$task_group" "$task_id" "merge_fix" "MERGE_FIX_FAILED" "error" "merge-fix failed: codex conflict resolution failed"
       return 1
     fi
+    _progress_event "$status_dir" "$run_id" "$task_group" "$task_id" "merge_fix" "MERGE_FIX_PROGRESS" "info" "merge-fix codex conflict resolution completed"
   fi
 
   # Enforce: never commit task/log changes.
@@ -316,11 +369,14 @@ EOT
   unresolved=$(cd "$fix_dir" && git diff --name-only --diff-filter=U || true)
   if [[ -n "$unresolved" ]]; then
     echo "merge-fix unresolved conflicts for $mergefix_branch: $unresolved" >>"$merge_log"
+    _progress_event "$status_dir" "$run_id" "$task_group" "$task_id" "merge_fix" "MERGE_FIX_FAILED" "error" "merge-fix unresolved conflicts remain" "$(jq -nc --arg unresolved "$unresolved" '{unresolved:$unresolved}')"
     return 1
   fi
+  _progress_event "$status_dir" "$run_id" "$task_group" "$task_id" "merge_fix" "MERGE_FIX_PROGRESS" "info" "merge-fix conflicts staged and resolved"
 
   if ! (cd "$fix_dir" && git -c user.name="ralphex" -c user.email="ralphex@local" commit --no-edit) >>"$merge_log" 2>&1; then
     echo "merge-fix commit failed for $mergefix_branch" >>"$merge_log"
+    _progress_event "$status_dir" "$run_id" "$task_group" "$task_id" "merge_fix" "MERGE_FIX_FAILED" "error" "merge-fix failed: commit failed"
     return 1
   fi
 
@@ -342,6 +398,7 @@ EOT
   integration_dir="$(_create_integration_worktree "$workspace" "$run_id" "$integration_branch" "$integration_branch")"
   if ! _merge_success_branch "$integration_dir" "$mergefix_branch" "$merge_log"; then
     echo "merge-fix failed to merge back into integration: $mergefix_branch" >>"$merge_log"
+    _progress_event "$status_dir" "$run_id" "$task_group" "$task_id" "merge_fix" "MERGE_FIX_FAILED" "error" "merge-fix failed: merge back into integration failed"
     return 1
   fi
 
@@ -349,6 +406,7 @@ EOT
   git -C "$workspace" branch -D "$mergefix_branch" >/dev/null 2>&1 || true
 
   _run_log_json "$jobs_file" --arg run_id "$run_id" --arg task_id "$task_id" --arg branch "$task_branch" --arg status "MERGE_FIX_DONE" '{ts:now|todateiso8601, run_id:$run_id, task_id:$task_id, branch:$branch, status:$status}'
+  _progress_event "$status_dir" "$run_id" "$task_group" "$task_id" "merge_fix" "MERGE_FIX_DONE" "info" "merge-fix merged back into integration"
   return 0
 }
 
@@ -389,6 +447,7 @@ resume_parallel_run() {
 
   _ui_prefix "Plan" "Resuming run $run_id with group-barrier orchestrator"
   _run_log_json "$jobs_file" --arg run_id "$run_id" --arg status "RESUME_STARTED" '{ts:now|todateiso8601, run_id:$run_id, status:$status}'
+  _progress_event "$status_dir" "$run_id" "" "" "plan" "RUN_RESUMED" "info" "resume started"
 
   local group
   while IFS= read -r group || [[ -n "$group" ]]; do
@@ -396,6 +455,7 @@ resume_parallel_run() {
 
     if jq -e --arg g "$group" 'select(.group==$g and .status=="GROUP_COMPLETED")' "$jobs_file" >/dev/null 2>&1; then
       _ui_prefix "Group $group" "Skipping: already completed in prior run stage"
+      _progress_event "$status_dir" "$run_id" "$group" "" "plan" "GROUP_SKIPPED" "info" "group already completed; skipping"
       continue
     fi
 
@@ -419,6 +479,7 @@ resume_parallel_run() {
         if ! _auto_resolve_merge_conflict "$workspace" "$run_id" "$integration_branch" "$task_id" "$branch"; then
           ui_print_group_task_result "$task_id" "failed" "resume_merge_failed"
           record_orchestrator_event "$jobs_file" "$run_id" "$group" "GROUP_FAILED" '{"reason":"resume_merge_failed"}'
+          _progress_event "$status_dir" "$run_id" "$group" "$task_id" "task" "TASK_RESULT" "error" "resume merge failed"
           return 1
         fi
         integration_dir="$(_create_integration_worktree "$workspace" "$run_id" "$integration_branch" "$integration_branch")"
@@ -438,6 +499,7 @@ resume_parallel_run() {
   done <<<"$groups"
 
   _run_log_json "$jobs_file" --arg run_id "$run_id" --arg status "RESUME_DONE" '{ts:now|todateiso8601, run_id:$run_id, status:$status}'
+  _progress_event "$status_dir" "$run_id" "" "" "summary" "RUN_DONE" "info" "resume completed"
   return 0
 }
 
@@ -458,6 +520,7 @@ repair_parallel_run() {
 
   _ui_prefix "Plan" "Repairing run $run_id from first incomplete group barrier"
   _run_log_json "$jobs_file" --arg run_id "$run_id" --arg status "REPAIR_STARTED" '{ts:now|todateiso8601, run_id:$run_id, status:$status}'
+  _progress_event "$status_dir" "$run_id" "" "" "plan" "RUN_REPAIRED" "info" "repair started"
 
   local groups
   groups=$(get_pending_groups "$workspace" || true)
@@ -466,6 +529,7 @@ repair_parallel_run() {
     [[ -z "$group" ]] && continue
     if jq -e --arg g "$group" 'select(.group==$g and .status=="GROUP_COMPLETED")' "$jobs_file" >/dev/null 2>&1; then
       _ui_prefix "Group $group" "Skipping: already completed"
+      _progress_event "$status_dir" "$run_id" "$group" "" "plan" "GROUP_SKIPPED" "info" "group already completed; skipping"
       continue
     fi
 
@@ -486,11 +550,13 @@ repair_parallel_run() {
       _ui_prefix "Group $group" "Stopped: repair orchestrator failed"
       record_orchestrator_event "$jobs_file" "$run_id" "$group" "GROUP_FAILED" '{"reason":"repair_orchestrator_failed"}'
       _run_log_json "$jobs_file" --arg run_id "$run_id" --arg status "REPAIR_FAILED" '{ts:now|todateiso8601, run_id:$run_id, status:$status}'
+      _progress_event "$status_dir" "$run_id" "$group" "" "summary" "RUN_DONE" "error" "repair failed"
       return 1
     fi
   done <<<"$groups"
 
   _run_log_json "$jobs_file" --arg run_id "$run_id" --arg status "REPAIR_DONE" '{ts:now|todateiso8601, run_id:$run_id, status:$status}'
+  _progress_event "$status_dir" "$run_id" "" "" "summary" "RUN_DONE" "info" "repair completed"
   return 0
 }
 
@@ -532,6 +598,7 @@ run_parallel_tasks() {
   [[ "$max_parallel" -le 1 ]] && execution_mode="sequential"
   _ui_prefix "Plan" "Execution mode selected: $execution_mode"
   _ui_prefix "Plan" "Run stream started (run_id=$run_id)"
+  _progress_event "$status_dir" "$run_id" "" "" "plan" "RUN_PLAN_READY" "info" "run plan ready" "$(jq -nc --arg mode "$execution_mode" --arg base_ref "$base_ref" --arg max_parallel "$max_parallel" --arg max_tasks "$max_tasks" '{mode:$mode,base_ref:$base_ref,max_parallel:($max_parallel|tonumber),max_tasks:($max_tasks|tonumber)}')"
 
   local groups
   groups=$(get_pending_groups "$workspace" || true)
@@ -541,6 +608,7 @@ run_parallel_tasks() {
   fi
 
   _run_log_json "$jobs_file" --arg run_id "$run_id" --arg base_ref "$base_ref" --arg status "RUN_STARTED" '{ts:now|todateiso8601, run_id:$run_id, base_ref:$base_ref, status:$status}'
+  _progress_event "$status_dir" "$run_id" "" "" "plan" "RUN_STARTED" "info" "run started" "$(jq -nc --arg base_ref "$base_ref" --arg mode "$execution_mode" '{base_ref:$base_ref,mode:$mode}')"
 
   local merged_count=0
   local failed_count=0
@@ -654,6 +722,7 @@ run_parallel_tasks() {
           blocked_count=$((blocked_count + 1))
           blocked_in_group=$((blocked_in_group + 1))
           ui_print_group_task_result "$task_id" "blocked" "missing_tool:$missing"
+          _progress_event "$status_dir" "$run_id" "$group" "$task_id" "task" "TASK_RESULT" "warn" "task blocked: missing tool $missing" "$(jq -nc --arg reason "missing_tool:$missing" '{reason:$reason}')"
           continue
         fi
 
@@ -712,6 +781,7 @@ run_parallel_tasks() {
           if _merge_success_branch "$integration_dir" "$branch" "$merge_log"; then
             _mark_task_complete_in_integration "$integration_dir" "$task_id" "$merge_log"
             _run_log_json "$jobs_file" --arg run_id "$run_id" --arg task_id "$task_id" --arg branch "$branch" --arg status "MERGED" '{ts:now|todateiso8601, run_id:$run_id, task_id:$task_id, branch:$branch, status:$status}'
+            _progress_event "$status_dir" "$run_id" "$group" "$task_id" "task" "TASK_RESULT" "info" "task merged to integration" "$(jq -nc --arg branch "$branch" '{branch:$branch,result:"merged"}')"
             merged_count=$((merged_count + 1))
             merged_in_group=$((merged_in_group + 1))
             log_progress "$workspace" "Merged $task_id into $integration_branch (group $group)."
@@ -719,10 +789,12 @@ run_parallel_tasks() {
           else
             echo "Merge failed for $branch" >>"$status_dir/merge_failures.log"
             _run_log_json "$jobs_file" --arg run_id "$run_id" --arg task_id "$task_id" --arg branch "$branch" --arg status "MERGE_FAILED" '{ts:now|todateiso8601, run_id:$run_id, task_id:$task_id, branch:$branch, status:$status}'
+            _progress_event "$status_dir" "$run_id" "$group" "$task_id" "task" "TASK_RESULT" "warn" "merge failed; attempting merge-fix" "$(jq -nc --arg branch "$branch" '{branch:$branch,result:"merge_failed"}')"
             if _auto_resolve_merge_conflict "$workspace" "$run_id" "$integration_branch" "$task_id" "$branch"; then
               integration_dir="$(_create_integration_worktree "$workspace" "$run_id" "$integration_branch" "$integration_branch")"
               _mark_task_complete_in_integration "$integration_dir" "$task_id" "$merge_log"
               _run_log_json "$jobs_file" --arg run_id "$run_id" --arg task_id "$task_id" --arg branch "$branch" --arg status "MERGED" '{ts:now|todateiso8601, run_id:$run_id, task_id:$task_id, branch:$branch, status:$status}'
+              _progress_event "$status_dir" "$run_id" "$group" "$task_id" "task" "TASK_RESULT" "info" "task merged after merge-fix" "$(jq -nc --arg branch "$branch" '{branch:$branch,result:"merged_after_merge_fix"}')"
               merged_count=$((merged_count + 1))
               merged_in_group=$((merged_in_group + 1))
               log_progress "$workspace" "Auto-resolved merge and merged $task_id into $integration_branch."
@@ -734,6 +806,7 @@ run_parallel_tasks() {
               log_error "$workspace" "Fatal: unresolvable merge for $task_id ($branch)."
               log_progress "$workspace" "Stopped due to unresolvable merge for $task_id ($branch). See $status_dir/merge.log."
               ui_print_group_task_result "$task_id" "failed" "unresolvable_merge"
+              _progress_event "$status_dir" "$run_id" "$group" "$task_id" "task" "TASK_RESULT" "error" "task failed: unresolvable merge" "$(jq -nc --arg branch "$branch" '{branch:$branch,reason:"unresolvable_merge"}')"
             fi
           fi
         else
@@ -741,6 +814,7 @@ run_parallel_tasks() {
           _run_log_json "$jobs_file" --arg run_id "$run_id" --arg task_id "$task_id" --arg branch "$branch" --arg status "JOB_FAILED" --arg reason "$reason" '{ts:now|todateiso8601, run_id:$run_id, task_id:$task_id, branch:$branch, status:$status, reason:$reason}'
           failed_count=$((failed_count + 1))
           ui_print_group_task_result "$task_id" "failed" "$reason"
+          _progress_event "$status_dir" "$run_id" "$group" "$task_id" "task" "TASK_RESULT" "error" "task failed: $reason" "$(jq -nc --arg reason "$reason" '{reason:$reason}')"
         fi
 
         _cleanup_worktree "$workspace" "$wt_dir"
@@ -812,6 +886,8 @@ run_parallel_tasks() {
     --arg next_action "$next_action" \
     '{groups:{completed:$g_completed,failed:$g_failed,skipped:$g_skipped},tasks:{executed:$t_executed,merged:$t_merged,skipped:$t_skipped,blocked:$t_blocked,failed:$t_failed},orchestrator:{attempted:$o_attempted,succeeded:$o_succeeded,failed:$o_failed,cleanup_ok:$o_cleanup_ok},head:{sha:$head_sha,branch:$head_branch,main_clean:$main_clean},next_action:$next_action}')
   ui_print_final_summary "$run_id" "$aggregate_json"
+  _progress_event "$status_dir" "$run_id" "" "" "summary" "RUN_SUMMARY" "info" "run summary emitted" "$aggregate_json"
+  _progress_event "$status_dir" "$run_id" "" "" "summary" "RUN_DONE" "$([[ "$failed_count" -gt 0 ]] && echo error || echo info)" "run completed"
 
   if [[ "$failed_count" -gt 0 ]]; then
     return 1

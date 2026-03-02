@@ -8,9 +8,151 @@ if [[ -n "${RALPHEX_UI_SH_LOADED:-}" ]]; then
 fi
 RALPHEX_UI_SH_LOADED=1
 
+RALPHEX_LIVE_PROGRESS="${RALPHEX_LIVE_PROGRESS:-1}"
+RALPHEX_NO_LIVE="${RALPHEX_NO_LIVE:-0}"
+RALPHEX_REASONING_SUMMARY="${RALPHEX_REASONING_SUMMARY:-1}"
+
+UI_LIVE_ENABLED=0
+UI_LIVE_LAST_LEN=0
+UI_LIVE_ACTIVE=0
+UI_LIVE_WIDTH=120
+UI_LIVE_LAST_LINE=""
+UI_LIVE_START_TS=0
+
+_ui_now_iso() {
+  date -u '+%Y-%m-%dT%H:%M:%SZ'
+}
+
+_ui_sanitize_text() {
+  local input="${1:-}"
+  local max_len="${2:-300}"
+  local out
+  out=$(printf '%s' "$input" | tr '\r\n' ' ' | tr -cd '\11\12\15\40-\176')
+  out=$(printf '%s' "$out" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')
+  if [[ ${#out} -gt "$max_len" ]]; then
+    out="${out:0:$((max_len-3))}..."
+  fi
+  printf '%s' "$out"
+}
+
+ui_emit_event() {
+  local status_dir="$1"
+  local event_json="$2"
+  [[ -n "${status_dir:-}" ]] || return 0
+  mkdir -p "$status_dir" >/dev/null 2>&1 || true
+  local progress_file="$status_dir/progress.jsonl"
+  local normalized
+  normalized=$(jq -c '
+    {
+      ts: (.ts // (now|todateiso8601)),
+      run_id: (.run_id // ""),
+      group: (.group // null),
+      task_id: (.task_id // null),
+      stage: (.stage // "plan"),
+      event: (.event // "UNSPECIFIED"),
+      level: (.level // "info"),
+      message: ((.message // "") | tostring),
+      meta: (if (.meta|type)=="object" then .meta else {} end)
+    }' <<<"$event_json" 2>/dev/null || true)
+  [[ -n "$normalized" ]] || return 0
+  printf '%s\n' "$normalized" >>"$progress_file" 2>/dev/null || true
+}
+
+ui_emit_standard_event() {
+  local status_dir="$1"
+  local run_id="$2"
+  local group="${3:-}"
+  local task_id="${4:-}"
+  local stage="$5"
+  local event="$6"
+  local level="$7"
+  local message="$8"
+  local meta_json="${9:-{}}"
+
+  if ! jq -e . >/dev/null 2>&1 <<<"$meta_json"; then
+    meta_json=$(jq -nc --arg raw "$meta_json" '{detail_raw:$raw}')
+  fi
+
+  local payload
+  payload=$(jq -nc \
+    --arg ts "$(_ui_now_iso)" \
+    --arg run_id "$run_id" \
+    --arg group "$group" \
+    --arg task_id "$task_id" \
+    --arg stage "$stage" \
+    --arg event "$event" \
+    --arg level "$level" \
+    --arg message "$(_ui_sanitize_text "$message" 300)" \
+    --argjson meta "$meta_json" \
+    '{ts:$ts,run_id:$run_id,group:($group|if .=="" then null else . end),task_id:($task_id|if .=="" then null else . end),stage:$stage,event:$event,level:$level,message:$message,meta:$meta}')
+  ui_emit_event "$status_dir" "$payload"
+}
+
+ui_live_init() {
+  if [[ "$RALPHEX_LIVE_PROGRESS" != "1" || "$RALPHEX_NO_LIVE" == "1" ]]; then
+    UI_LIVE_ENABLED=0
+    return 0
+  fi
+  if [[ ! -t 1 || "${TERM:-dumb}" == "dumb" ]]; then
+    UI_LIVE_ENABLED=0
+    return 0
+  fi
+  UI_LIVE_ENABLED=1
+  UI_LIVE_LAST_LEN=0
+  UI_LIVE_ACTIVE=0
+  UI_LIVE_START_TS=$(date +%s 2>/dev/null || echo 0)
+  UI_LIVE_WIDTH=$(tput cols 2>/dev/null || echo 120)
+  [[ "$UI_LIVE_WIDTH" -gt 0 ]] || UI_LIVE_WIDTH=120
+}
+
+ui_live_flush_line() {
+  if [[ "$UI_LIVE_ENABLED" -eq 1 && "$UI_LIVE_ACTIVE" -eq 1 ]]; then
+    printf '\r%*s\r' "$UI_LIVE_LAST_LEN" ''
+    printf '%s\n' "$UI_LIVE_LAST_LINE"
+    UI_LIVE_ACTIVE=0
+  fi
+}
+
+ui_live_update() {
+  local stage="$1"
+  local text="$2"
+  local _level="${3:-info}"
+  if [[ "$UI_LIVE_ENABLED" -ne 1 ]]; then
+    return 0
+  fi
+  local now elapsed line max_width
+  now=$(date +%s 2>/dev/null || echo 0)
+  elapsed=$((now - UI_LIVE_START_TS))
+  (( elapsed < 0 )) && elapsed=0
+  line="[Live] ${stage} | $(_ui_sanitize_text "$text" 220) | $(printf '%02d:%02d' $((elapsed/60)) $((elapsed%60))) elapsed"
+  max_width=$((UI_LIVE_WIDTH - 1))
+  (( max_width < 40 )) && max_width=40
+  if [[ ${#line} -gt "$max_width" ]]; then
+    line="${line:0:$((max_width-3))}..."
+  fi
+  local pad=$((UI_LIVE_LAST_LEN - ${#line}))
+  (( pad < 0 )) && pad=0
+  printf '\r%s%*s' "$line" "$pad" ''
+  UI_LIVE_LAST_LEN=${#line}
+  UI_LIVE_LAST_LINE="$line"
+  UI_LIVE_ACTIVE=1
+}
+
+ui_live_stop() {
+  if [[ "$UI_LIVE_ENABLED" -eq 1 ]]; then
+    if [[ "$UI_LIVE_ACTIVE" -eq 1 ]]; then
+      printf '\r%*s\r' "$UI_LIVE_LAST_LEN" ''
+      printf '%s\n' "$UI_LIVE_LAST_LINE"
+    fi
+  fi
+  UI_LIVE_ACTIVE=0
+  UI_LIVE_LAST_LEN=0
+}
+
 _ui_prefix() {
   local stage="$1"
   shift || true
+  ui_live_flush_line
   echo "[$stage] $*"
 }
 
@@ -27,12 +169,21 @@ ui_print_run_header() {
   _ui_prefix "Plan" "Base branch: $base_branch"
   _ui_prefix "Plan" "Execution mode: $mode"
   _ui_prefix "Plan" "Model: $model | Sandbox: $sandbox"
+  local status_dir
+  status_dir="$(ralphex_state_dir "$workspace")/parallel/$run_id"
+  ui_emit_standard_event "$status_dir" "$run_id" "" "" "plan" "RUN_PLAN_READY" "info" "run plan header rendered" "$(jq -nc --arg base_branch "$base_branch" --arg mode "$mode" --arg model "$model" --arg sandbox "$sandbox" '{base_branch:$base_branch,mode:$mode,model:$model,sandbox:$sandbox}')" || true
 }
 
 ui_run_doctor_or_exit() {
   local workspace="$1"
   local had_errors=0
   local had_warnings=0
+  local run_id_hint="${RALPHEX_RUN_ID_HINT:-}"
+  local status_dir_hint=""
+  if [[ -n "$run_id_hint" ]]; then
+    status_dir_hint="$(ralphex_state_dir "$workspace")/parallel/$run_id_hint"
+    ui_emit_standard_event "$status_dir_hint" "$run_id_hint" "" "" "doctor" "DOCTOR_STARTED" "info" "doctor started" || true
+  fi
 
   _ui_prefix "Doctor" "Running preflight checks..."
 
@@ -104,13 +255,16 @@ ui_run_doctor_or_exit() {
   _ui_prefix "Doctor" "Model preflight will run next."
 
   if [[ "$had_errors" -eq 1 ]]; then
+    [[ -n "$run_id_hint" ]] && ui_emit_standard_event "$status_dir_hint" "$run_id_hint" "" "" "doctor" "DOCTOR_RESULT" "error" "doctor failed" || true
     _ui_prefix "Doctor" "Result: FAIL (blocking)"
     return 2
   fi
   if [[ "$had_warnings" -eq 1 ]]; then
+    [[ -n "$run_id_hint" ]] && ui_emit_standard_event "$status_dir_hint" "$run_id_hint" "" "" "doctor" "DOCTOR_RESULT" "warn" "doctor warnings" || true
     _ui_prefix "Doctor" "Result: WARN (continuing)"
     return 0
   fi
+  [[ -n "$run_id_hint" ]] && ui_emit_standard_event "$status_dir_hint" "$run_id_hint" "" "" "doctor" "DOCTOR_RESULT" "info" "doctor ok" || true
   _ui_prefix "Doctor" "Result: OK"
   return 0
 }
@@ -174,6 +328,7 @@ ui_print_group_start() {
   local pending completed
   pending=$(echo "$counts_json" | jq -r '.pending')
   completed=$(echo "$counts_json" | jq -r '.completed')
+  ui_live_update "g${group}" "starting group in $mode mode (pending=$pending skipped=$completed)"
   _ui_prefix "Group $group" "Starting group in $mode mode (pending=$pending, skipped=$completed)"
 }
 
@@ -181,6 +336,7 @@ ui_print_group_task_result() {
   local task_id="$1"
   local result="$2"
   local reason="${3:-}"
+  ui_live_update "task $task_id" "$result${reason:+ ($reason)}"
   if [[ -n "$reason" ]]; then
     _ui_prefix "Task $task_id" "$result ($reason)"
   else
@@ -190,6 +346,7 @@ ui_print_group_task_result() {
 
 ui_print_orchestrator_start() {
   local group="$1"
+  ui_live_update "g${group}" "orchestrator stage entered"
   _ui_prefix "Orchestrator g$group" "Entering orchestrator stage (merge -> checkpoint -> cleanup)"
 }
 
@@ -197,6 +354,7 @@ ui_print_orchestrator_step() {
   local group="$1"
   local step="$2"
   local detail="${3:-}"
+  ui_live_update "g${group}" "orchestrator $step${detail:+: $detail}"
   _ui_prefix "Orchestrator g$group" "$step${detail:+: $detail}"
 }
 
@@ -204,6 +362,7 @@ ui_print_orchestrator_done() {
   local group="$1"
   local status="$2"
   local commit_sha="${3:-}"
+  ui_live_update "g${group}" "orchestrator done: $status${commit_sha:+ (commit=$commit_sha)}"
   if [[ -n "$commit_sha" ]]; then
     _ui_prefix "Orchestrator g$group" "Done: $status (commit=$commit_sha)"
   else
@@ -218,6 +377,7 @@ ui_print_group_done() {
   merged=$(echo "$stats_json" | jq -r '.merged // 0')
   failed=$(echo "$stats_json" | jq -r '.failed // 0')
   blocked=$(echo "$stats_json" | jq -r '.blocked // 0')
+  ui_live_update "g${group}" "group completed (merged=$merged failed=$failed blocked=$blocked)"
   _ui_prefix "Group $group" "Completed (merged=$merged failed=$failed blocked=$blocked)"
 }
 

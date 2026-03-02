@@ -26,6 +26,36 @@ record_orchestrator_event() {
     --arg status "$status" \
     --argjson details "$safe_details" \
     '{ts:now|todateiso8601, run_id:$run_id, group:$group, status:$status} + $details' >>"$jobs_file"
+
+  local status_dir=""
+  status_dir="$(dirname "$jobs_file")"
+  local stage="orchestrator"
+  local event="$status"
+  local level="info"
+  local message="$status"
+  case "$status" in
+    GROUP_STARTED)
+      stage="plan"; event="GROUP_STARTED"; message="group started" ;;
+    GROUP_TASKS_DONE)
+      stage="plan"; event="GROUP_TASKS_DONE"; message="group tasks done" ;;
+    GROUP_COMPLETED)
+      stage="summary"; event="GROUP_COMPLETED"; message="group completed" ;;
+    GROUP_FAILED)
+      stage="summary"; event="GROUP_FAILED"; level="error"; message="group failed" ;;
+    ORCH_STARTED)
+      stage="orchestrator"; event="ORCH_STARTED"; message="orchestrator started" ;;
+    ORCH_CONFLICT_RESOLVE_STARTED)
+      stage="orchestrator"; event="ORCH_STEP"; message="orchestrator conflict resolve started" ;;
+    ORCH_CONFLICT_RESOLVE_FAILED)
+      stage="orchestrator"; event="ORCH_FAILED"; level="error"; message="orchestrator conflict resolve failed" ;;
+    ORCH_MAIN_COMMIT_OK)
+      stage="orchestrator"; event="ORCH_DONE"; message="orchestrator checkpoint committed" ;;
+    ORCH_MAIN_COMMIT_FAILED)
+      stage="orchestrator"; event="ORCH_FAILED"; level="error"; message="orchestrator checkpoint failed" ;;
+    ORCH_CLEANUP_DONE)
+      stage="orchestrator"; event="ORCH_DONE"; message="orchestrator cleanup done" ;;
+  esac
+  ui_emit_standard_event "$status_dir" "$run_id" "$group" "" "$stage" "$event" "$level" "$message" "$safe_details" || true
 }
 
 _group_integration_branch() {
@@ -177,8 +207,15 @@ EOT
   (
     cd "$orchestrator_dir" || exit 1
     codex exec --json --sandbox "$SANDBOX" --model "$MODEL" "$prompt"
-  ) >>"$merge_log" 2>&1
-  local rc=$?
+  ) 2>&1 \
+    | tee -a "$merge_log" \
+    | RALPHEX_STREAM_STATUS_DIR="$status_dir" \
+      RALPHEX_STREAM_RUN_ID="$run_id" \
+      RALPHEX_STREAM_GROUP="$group" \
+      RALPHEX_STREAM_STAGE="orchestrator" \
+      RALPHEX_REASONING_SUMMARY="${RALPHEX_REASONING_SUMMARY:-1}" \
+      "$SCRIPT_DIR/ralphex-stream-parser.sh" "$orchestrator_dir" >/dev/null
+  local rc=${PIPESTATUS[0]}
   set -e
   if [[ "$rc" -ne 0 ]]; then
     record_orchestrator_event "$jobs_file" "$run_id" "$group" "ORCH_CONFLICT_RESOLVE_FAILED" '{"reason":"codex_failed"}'

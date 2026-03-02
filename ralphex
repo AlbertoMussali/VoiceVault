@@ -26,10 +26,11 @@ Usage:
 Commands:
   doctor                 Preflight checks and readiness
   run [opts]             Run tasks (sequential or parallel)
-  status [--run-id ID]   Show run summary
+  status [--run-id ID] [--tail N]  Show run summary + live progress
   watch  [--run-id ID]   Continuously show status
   resume --run-id ID     Resume a prior parallel run
   repair --run-id ID     Attempt hands-off repair/merge for a run
+  replay --run-id ID     Replay persisted progress timeline
   clean  [--run-id ID]   Clean stale worktrees/locks (preserves logs)
 
 Run options:
@@ -214,6 +215,7 @@ doctor() {
 
 status_cmd() {
   local run_id="${1:-$(_active_run_id)}"
+  local tail_n="${2:-20}"
   if [[ -z "${run_id:-}" ]]; then
     echo "No runs found."
     return 0
@@ -222,6 +224,7 @@ status_cmd() {
   local dir="$WORKSPACE/.ralphex/parallel/$run_id"
   local meta="$dir/run.meta"
   local jobs="$dir/jobs.jsonl"
+  local progress="$dir/progress.jsonl"
 
   echo "Run: $run_id"
   local integration_branch=""
@@ -263,6 +266,41 @@ status_cmd() {
     }
   ' "$jobs"
 
+  if [[ -f "$progress" ]]; then
+    echo ""
+    echo "Latest live event:"
+    jq -sr 'if length==0 then "none" else (last | "[\(.ts)] stage=\(.stage) event=\(.event) level=\(.level) msg=\(.message)") end' "$progress" 2>/dev/null || true
+
+    echo ""
+    echo "Progress by group:"
+    jq -s '
+      map(select(.group != null))
+      | group_by(.group)
+      | map({group: .[0].group, stage: .[-1].stage, event: .[-1].event, level: .[-1].level})
+      | sort_by(.group)
+      | .[]
+      | "group=\(.group) stage=\(.stage) event=\(.event) level=\(.level)"
+    ' -r "$progress" | sed -n '1,40p'
+
+    echo ""
+    echo "Current active task:"
+    jq -s '
+      map(select(.task_id != null and (.event=="TASK_STARTED" or .event=="TASK_HEARTBEAT" or .event=="TASK_RESULT")))
+      | if length==0 then "none" else .[-1] | "task=\(.task_id) event=\(.event) level=\(.level) msg=\(.message)" end
+    ' -r "$progress"
+
+    echo ""
+    echo "Last live error:"
+    jq -s '
+      map(select(.level=="error"))
+      | if length==0 then "none" else .[-1] | "[\(.ts)] stage=\(.stage) event=\(.event) msg=\(.message)" end
+    ' -r "$progress"
+
+    echo ""
+    echo "Recent live timeline (tail=$tail_n):"
+    tail -n "$tail_n" "$progress" | jq -r '"\(.ts) [\(.stage)] \(.event) \(.message)"' 2>/dev/null || tail -n "$tail_n" "$progress"
+  fi
+
   echo ""
   echo "Group status:"
   jq -s '
@@ -272,7 +310,7 @@ status_cmd() {
     | sort_by(.group)
     | .[]
     | "group=\(.group) status=\(.last)"
-  ' "$jobs" | sed -n '1,40p'
+  ' -r "$jobs" | sed -n '1,40p'
 
   echo ""
   echo "Recent failures:"
@@ -291,6 +329,18 @@ status_cmd() {
     | .[]
     | "\(.value.ts) job=\(.key) task=\(.value.task_id) branch=\(.value.branch)"
   ' "$jobs" | sed -n '1,20p'
+}
+
+replay_cmd() {
+  local run_id="${1:-$(_active_run_id)}"
+  if [[ -z "${run_id:-}" ]]; then
+    echo "No runs found."
+    return 0
+  fi
+  local progress="$WORKSPACE/.ralphex/parallel/$run_id/progress.jsonl"
+  [[ -f "$progress" ]] || { echo "No progress.jsonl at $progress"; return 1; }
+  echo "Replay run: $run_id"
+  jq -r '"\(.ts) [\(.stage)] \(.event) g=\(.group // "-") t=\(.task_id // "-") | \(.message)"' "$progress"
 }
 
 watch_cmd() {
@@ -346,10 +396,14 @@ case "$cmd" in
     ;;
   status)
     rid=""
+    tail_n="20"
     if [[ "${1:-}" == "--run-id" ]]; then
       rid="${2:-}"; shift 2 || true
     fi
-    status_cmd "$rid"
+    if [[ "${1:-}" == "--tail" ]]; then
+      tail_n="${2:-20}"; shift 2 || true
+    fi
+    status_cmd "$rid" "$tail_n"
     ;;
   watch)
     rid=""
@@ -368,6 +422,11 @@ case "$cmd" in
     [[ "${1:-}" == "--run-id" ]] || { echo "usage: ./ralphex repair --run-id <ID>"; exit 2; }
     rid="${2:-}"
     repair_parallel_run "$WORKSPACE" "$rid"
+    ;;
+  replay)
+    [[ "${1:-}" == "--run-id" ]] || { echo "usage: ./ralphex replay --run-id <ID>"; exit 2; }
+    rid="${2:-}"
+    replay_cmd "$rid"
     ;;
   clean)
     rid=""
