@@ -14,3 +14,20 @@
 
 # Local ralphex logs/state (keep out of git to avoid merge churn)
 .ralph/
+
+# Python
+**/__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+
+# Node
+**/node_modules/
+**/dist/
+**/build/
+
+# macOS
+.DS_Store
