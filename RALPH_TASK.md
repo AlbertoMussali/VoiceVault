@@ -84,118 +84,118 @@ Notes:
 
 - [x] [INF] Create monorepo folder structure (`apps/web`, `apps/api`, `infra`, `docs`). <!-- group: 100 -->
   - Done when: tree exists; minimal READMEs in each folder explain purpose.
-- [ ] [INF] Add dev Docker Compose stack (api, worker, db, redis, web). <!-- group: 100 -->
+- [x] [INF] Add dev Docker Compose stack (api, worker, db, redis, web). <!-- group: 100 -->
   - Done when: `docker compose up` boots all services without manual steps.
-- [x] [BE] Implement FastAPI skeleton (`/health`, `/version`, settings loader). <!-- group: 100 -->
+- [ ] [BE] Implement FastAPI skeleton (`/health`, `/version`, settings loader). <!-- group: 100 -->
   - Done when: API container serves health/version endpoints.
-- [ ] [FE] Implement Vite + React skeleton with routes (`/login`, `/signup`, `/app`). <!-- group: 100 -->
+- [x] [FE] Implement Vite + React skeleton with routes (`/login`, `/signup`, `/app`). <!-- group: 100 -->
   - Done when: web container serves UI and routes render.
-- [x] [INF] Add CI pipeline (lint + tests for FE/BE). <!-- group: 100 -->
+- [ ] [INF] Add CI pipeline (lint + tests for FE/BE). <!-- group: 100 -->
   - Done when: CI runs on PR/commit and is green on main branch.
-- [ ] [BE] Wire Alembic migrations and DB connectivity end-to-end. <!-- group: 100 -->
+- [x] [BE] Wire Alembic migrations and DB connectivity end-to-end. <!-- group: 100 -->
   - Done when: `alembic upgrade head` runs in container against compose Postgres.
-- [x] [FE] Set up Tailwind + shadcn/ui, router, TanStack Query client. <!-- group: 100 -->
+- [ ] [FE] Set up Tailwind + shadcn/ui, router, TanStack Query client. <!-- group: 100 -->
   - Done when: basic styled UI components render, no build warnings.
-- [ ] [QA] Define project “Definition of Done” and minimal smoke plan in `docs/`. <!-- group: 100 -->
+- [x] [QA] Define project “Definition of Done” and minimal smoke plan in `docs/`. <!-- group: 100 -->
   - Done when: includes required tests per layer and “how to run locally”.
-- [ ] [INF] Add `Makefile` targets (`make dev-up`, `make dev-down`, `make lint`, `make test`). <!-- group: 100 -->
+- [x] [INF] Add `Makefile` targets (`make dev-up`, `make dev-down`, `make lint`, `make test`). <!-- group: 100 -->
   - Done when: `make test` exists (even if minimal at first) and is used by Ralphex.
 
 ## Phase 1 — Core backend platform: auth, storage, jobs, base schema
 
-- [x] [BE] Implement DB schema v1 (users, entries, transcripts, audio_assets, tags, audit_log). <!-- group: 200 -->
+- [ ] [BE] Implement DB schema v1 (users, entries, transcripts, audio_assets, tags, audit_log). <!-- group: 200 -->
   - Done when: migrations create tables; app can connect and query.
-- [x] [BE] Implement auth service: signup/login/refresh/logout with Argon2. <!-- group: 200 -->
+- [ ] [BE] Implement auth service: signup/login/refresh/logout with Argon2. <!-- group: 200 -->
   - Done when: accounts can be created and sessions refreshed.
-- [x] [FE] Implement auth UI (signup/login) + token refresh integration. <!-- group: 200 -->
+- [ ] [FE] Implement auth UI (signup/login) + token refresh integration. <!-- group: 200 -->
   - Done when: user can login and reach `/app`.
-- [x] [BE] Add authorization middleware (all entry routes require auth). <!-- group: 200 -->
+- [ ] [BE] Add authorization middleware (all entry routes require auth). <!-- group: 200 -->
   - Done when: unauthenticated calls are rejected consistently.
-- [x] [BE] Implement storage abstraction + local disk backend. <!-- group: 200 -->
+- [ ] [BE] Implement storage abstraction + local disk backend. <!-- group: 200 -->
   - Done when: audio can be stored/retrieved by a storage key.
-- [x] [BE] Add file upload skeleton for `POST /entries/{id}/audio` (store blob + metadata). <!-- group: 200 -->
+- [ ] [BE] Add file upload skeleton for `POST /entries/{id}/audio` (store blob + metadata). <!-- group: 200 -->
   - Done when: blob persists; metadata recorded in DB; endpoint validated.
-- [x] [BE] Integrate RQ worker process + job registry in compose. <!-- group: 200 -->
+- [ ] [BE] Integrate RQ worker process + job registry in compose. <!-- group: 200 -->
   - Done when: worker runs and can execute a stub job.
-- [x] [BE] Add audit logging middleware for auth + entry events (no content). <!-- group: 200 -->
+- [ ] [BE] Add audit logging middleware for auth + entry events (no content). <!-- group: 200 -->
   - Done when: DB audit rows exist for key actions.
-- [x] [QA] Add backend unit tests for auth + storage + basic CRUD. <!-- group: 200 -->
+- [ ] [QA] Add backend unit tests for auth + storage + basic CRUD. <!-- group: 200 -->
   - Done when: `make test` runs these and passes.
-- [ ] [INF] Add env management: `.env.example` + documented secrets strategy (dev/prod). <!-- group: 200 -->
+- [x] [INF] Add env management: `.env.example` + documented secrets strategy (dev/prod). <!-- group: 200 -->
   - Done when: new dev can boot from docs + `.env.example`.
 
 ## Phase 2 — Audio capture (web), upload, transcription pipeline (v0 usable)
 
-- [x] [FE] Build recording UI with MediaRecorder (webm blob, timer). <!-- group: 300 -->
+- [ ] [FE] Build recording UI with MediaRecorder (webm blob, timer). <!-- group: 300 -->
   - Done when: user can record/stop and obtain a playable blob.
-- [x] [BE] Implement `POST /entries` to create an entry shell. <!-- group: 300 -->
+- [ ] [BE] Implement `POST /entries` to create an entry shell. <!-- group: 300 -->
   - Done when: returns `entry_id`; entry stored with correct initial status.
-- [x] [FE] Implement upload pipeline: create entry → upload audio → poll status. <!-- group: 300 -->
+- [ ] [FE] Implement upload pipeline: create entry → upload audio → poll status. <!-- group: 300 -->
   - Done when: UI shows uploading/transcribing/ready/error states.
-- [x] [BE] Implement multipart audio upload fully: store blob, set status=transcribing, enqueue job. <!-- group: 300 -->
+- [ ] [BE] Implement multipart audio upload fully: store blob, set status=transcribing, enqueue job. <!-- group: 300 -->
   - Done when: upload triggers job and persists audio asset record.
-- [x] [AI] Implement transcription worker job using OpenAI STT and store transcript v1. <!-- group: 300 -->
+- [ ] [AI] Implement transcription worker job using OpenAI STT and store transcript v1. <!-- group: 300 -->
   - Done when: transcript saved; entry status flips to ready.
-- [x] [BE] Define and enforce error contract (transient vs fatal; error_code/message). <!-- group: 300 -->
+- [ ] [BE] Define and enforce error contract (transient vs fatal; error_code/message). <!-- group: 300 -->
   - Done when: failures are visible in UI and safe retries are possible.
-- [x] [FE] Implement processing screen with retry path where safe. <!-- group: 300 -->
+- [ ] [FE] Implement processing screen with retry path where safe. <!-- group: 300 -->
   - Done when: user can recover from common failures without data loss.
-- [x] [BE] Add audit events: `audio_uploaded`, `transcription_called` (no content; include model/bytes). <!-- group: 300 -->
+- [ ] [BE] Add audit events: `audio_uploaded`, `transcription_called` (no content; include model/bytes). <!-- group: 300 -->
   - Done when: audit log shows processing timeline.
-- [x] [QA] Add integration test path: upload small file + stub OpenAI in test mode. <!-- group: 300 -->
+- [ ] [QA] Add integration test path: upload small file + stub OpenAI in test mode. <!-- group: 300 -->
   - Done when: test suite validates pipeline deterministically.
 
 ## Phase 3 — Entry detail, transcript versioning, and “5-second indexing”
 
-- [x] [BE] Implement transcript versioning: `PATCH /entries/{id}/transcript` creates version+1. <!-- group: 400 -->
+- [ ] [BE] Implement transcript versioning: `PATCH /entries/{id}/transcript` creates version+1. <!-- group: 400 -->
   - Done when: old transcript preserved; new version becomes active.
-- [x] [FE] Implement entry detail page: audio player + transcript display. <!-- group: 400 -->
+- [ ] [FE] Implement entry detail page: audio player + transcript display. <!-- group: 400 -->
   - Done when: entry renders reliably and is navigable from timeline/search.
-- [x] [FE] Implement “Edit transcript” mode that creates a new transcript version. <!-- group: 400 -->
+- [ ] [FE] Implement “Edit transcript” mode that creates a new transcript version. <!-- group: 400 -->
   - Done when: edits persist; version increments; UI indicates edited status.
-- [x] [FE] Implement 5-second indexing modal post-transcription (type, context, tags). <!-- group: 400 -->
+- [ ] [FE] Implement 5-second indexing modal post-transcription (type, context, tags). <!-- group: 400 -->
   - Done when: user can classify Win/Blocker/etc + Work/Life + tags.
-- [x] [BE] Implement tags CRUD + autocomplete (normalized). <!-- group: 400 -->
+- [ ] [BE] Implement tags CRUD + autocomplete (normalized). <!-- group: 400 -->
   - Done when: tag suggestions work; entry-tag links persist.
-- [x] [BE] Implement baseline title behavior (deterministic or optional job). <!-- group: 400 -->
+- [ ] [BE] Implement baseline title behavior (deterministic or optional job). <!-- group: 400 -->
   - Done when: entries show a stable title without needing generation.
-- [x] [QA] Add tests for transcript revision + tag linking behavior. <!-- group: 400 -->
+- [ ] [QA] Add tests for transcript revision + tag linking behavior. <!-- group: 400 -->
   - Done when: edits don’t corrupt offsets; tag relations correct.
 
 ## Phase 4 — Timeline + search (FTS) + quote chips + highlight navigation
 
-- [x] [BE] Add Postgres FTS column/index for transcripts (`tsvector` + GIN). <!-- group: 500 -->
+- [ ] [BE] Add Postgres FTS column/index for transcripts (`tsvector` + GIN). <!-- group: 500 -->
   - Done when: queries are fast on realistic data volumes.
-- [x] [BE] Implement `/search` endpoint returning ranked snippets + offsets. <!-- group: 500 -->
+- [ ] [BE] Implement `/search` endpoint returning ranked snippets + offsets. <!-- group: 500 -->
   - Done when: response includes `{entry_id, transcript_id, snippet_text, start_char, end_char}`.
-- [x] [FE] Implement timeline UI with filters (date range, type, context, tags). <!-- group: 500 -->
+- [ ] [FE] Implement timeline UI with filters (date range, type, context, tags). <!-- group: 500 -->
   - Done when: browsing feels responsive and predictable.
-- [x] [FE] Implement search UI: query box + results + jump-to-highlight. <!-- group: 500 -->
+- [ ] [FE] Implement search UI: query box + results + jump-to-highlight. <!-- group: 500 -->
   - Done when: click result opens entry and highlights matching span.
-- [x] [FE] Implement quote chip on timeline cards. <!-- group: 500 -->
+- [ ] [FE] Implement quote chip on timeline cards. <!-- group: 500 -->
   - Done when: cards show a credible “receipt” snippet consistently.
-- [x] [BE] Implement auto-quote selection rule when no explicit snippet. <!-- group: 500 -->
+- [ ] [BE] Implement auto-quote selection rule when no explicit snippet. <!-- group: 500 -->
   - Done when: quote chip is meaningful (not empty/garbage).
-- [x] [FE] Implement transcript highlight navigation (scroll + span highlight). <!-- group: 500 -->
+- [ ] [FE] Implement transcript highlight navigation (scroll + span highlight). <!-- group: 500 -->
   - Done when: highlight lands accurately by offsets.
-- [x] [QA] Add E2E test: create entry → search term → open highlight. <!-- group: 500 -->
+- [ ] [QA] Add E2E test: create entry → search term → open highlight. <!-- group: 500 -->
   - Done when: runs in CI reliably.
 
 ## Phase 5 — Brag Doc v0 (career wedge, exportable)
 
-- [x] [FE] Implement Brag Doc UI skeleton (buckets + date range selector). <!-- group: 600 -->
+- [ ] [FE] Implement Brag Doc UI skeleton (buckets + date range selector). <!-- group: 600 -->
   - Done when: buckets render: Impact/Execution/Leadership/Collaboration/Growth.
-- [x] [BE] Implement brag bullet CRUD endpoints. <!-- group: 600 -->
+- [ ] [BE] Implement brag bullet CRUD endpoints. <!-- group: 600 -->
   - Done when: bullets persist, update, delete, list by bucket.
-- [x] [FE] Implement “Add to Brag” from entry detail using selected highlight/snippet. <!-- group: 600 -->
+- [ ] [FE] Implement “Add to Brag” from entry detail using selected highlight/snippet. <!-- group: 600 -->
   - Done when: creates bullet draft linked to evidence.
-- [x] [BE] Implement citation creation endpoint validating offsets vs transcript version. <!-- group: 600 -->
+- [ ] [BE] Implement citation creation endpoint validating offsets vs transcript version. <!-- group: 600 -->
   - Done when: invalid offsets rejected; citations immutable to source version.
-- [x] [FE] Implement bullet editor showing sources count + expandable evidence list. <!-- group: 600 -->
+- [ ] [FE] Implement bullet editor showing sources count + expandable evidence list. <!-- group: 600 -->
   - Done when: user can edit claim text without losing citations.
-- [x] [BE] Implement text export job producing downloadable report with dated quotes. <!-- group: 600 -->
+- [ ] [BE] Implement text export job producing downloadable report with dated quotes. <!-- group: 600 -->
   - Done when: export is reproducible and stored as a job artifact.
-- [x] [FE] Implement export UI (request → status → download). <!-- group: 600 -->
+- [ ] [FE] Implement export UI (request → status → download). <!-- group: 600 -->
   - Done when: user can generate and download export without manual ops.
 - [ ] [QA] Add brag export test (snapshot or deterministic fixtures). <!-- group: 600 -->
   - Done when: export format remains stable.
