@@ -411,6 +411,7 @@ run_parallel_tasks() {
   local launched_tasks=0
   local stop=0
   local job_global=0
+  local fatal=0
 
   while IFS= read -r group || [[ -n "$group" ]]; do
     if [[ "$stop" -eq 1 ]]; then
@@ -472,7 +473,9 @@ run_parallel_tasks() {
             merged_count=$((merged_count + 1))
           else
             _run_log_json "$jobs_file" --arg run_id "$run_id" --arg task_id "$task_id" --arg branch "$branch" --arg status "MERGE_FAILED" '{ts:now|todateiso8601, run_id:$run_id, task_id:$task_id, branch:$branch, status:$status}'
-          failed_count=$((failed_count + 1))
+            failed_count=$((failed_count + 1))
+            fatal=1
+            stop=1
           fi
         fi
       else
@@ -485,7 +488,15 @@ run_parallel_tasks() {
       if [[ "$outcome" == "SUCCESS" ]]; then
         git -C "$workspace" branch -D "$branch" >/dev/null 2>&1 || true
       fi
+
+      if [[ "$fatal" -eq 1 ]]; then
+        break
+      fi
     done
+
+    if [[ "$fatal" -eq 1 ]]; then
+      break
+    fi
   done <<< "$groups"
 
   echo "Parallel summary: launched=$launched_tasks merged=$merged_count failed=$failed_count"
