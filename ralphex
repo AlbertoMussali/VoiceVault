@@ -1,0 +1,308 @@
+#!/bin/bash
+# Ralphex applet wrapper (CLI-only)
+
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPTS_DIR="$ROOT_DIR/.cursor/ralphex-scripts"
+
+if [[ ! -d "$SCRIPTS_DIR" ]]; then
+  echo "Missing ralphex scripts dir: $SCRIPTS_DIR" >&2
+  exit 1
+fi
+
+source "$SCRIPTS_DIR/ralphex-common.sh"
+source "$SCRIPTS_DIR/ralphex-parallel.sh"
+
+WORKSPACE="$ROOT_DIR"
+
+usage() {
+  cat <<'EOT'
+Ralphex (CLI)
+
+Usage:
+  ./ralphex <command> [options]
+
+Commands:
+  doctor                 Preflight checks and readiness
+  run [opts]             Run tasks (sequential or parallel)
+  status [--run-id ID]   Show run summary
+  watch  [--run-id ID]   Continuously show status
+  resume --run-id ID     Resume a prior parallel run
+  repair --run-id ID     Attempt hands-off repair/merge for a run
+  clean  [--run-id ID]   Clean stale worktrees/locks (preserves logs)
+
+Run options:
+  --parallel
+  --max-parallel N
+  -n, --iterations N     In parallel mode: max tasks to launch
+  -m, --model MODEL
+  -s, --sandbox MODE
+  --branch NAME          (parallel integration branch)
+  -y, --yes
+
+Examples:
+  ./ralphex doctor
+  ./ralphex run --parallel --max-parallel 3 -n 50 -y
+  ./ralphex status
+  ./ralphex watch
+  ./ralphex resume --run-id 20260301131502 -y
+EOT
+}
+
+_lock_meta() {
+  local meta="$WORKSPACE/.ralph/lockdir/meta"
+  [[ -f "$meta" ]] && cat "$meta"
+}
+
+_active_run_id() {
+  local meta="$WORKSPACE/.ralph/lockdir/meta"
+  if [[ -f "$meta" ]]; then
+    awk -F= '$1=="run_id"{print $2}' "$meta"
+    return 0
+  fi
+  local latest
+  latest=$(ls -1 "$WORKSPACE/.ralph/parallel" 2>/dev/null | sort -r | head -n 1 || true)
+  [[ -n "$latest" ]] && echo "$latest"
+}
+
+_base_branch() {
+  if git -C "$WORKSPACE" show-ref --verify --quiet refs/heads/main; then
+    echo "main"
+  elif git -C "$WORKSPACE" show-ref --verify --quiet refs/heads/master; then
+    echo "master"
+  else
+    git -C "$WORKSPACE" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main"
+  fi
+}
+
+doctor() {
+  echo "Ralphex doctor"
+  echo "Workspace: $WORKSPACE"
+  echo ""
+
+  local ok=1
+
+  if ! git -C "$WORKSPACE" rev-parse --git-dir >/dev/null 2>&1; then
+    echo "[RED] git repo: missing"
+    return 1
+  fi
+  echo "[OK] git repo"
+
+  local base
+  base=$(_base_branch)
+  echo "[OK] base branch: $base"
+
+  if [[ -n "$(git -C "$WORKSPACE" ls-files -u 2>/dev/null)" ]]; then
+    echo "[RED] merge conflicts present"
+    ok=0
+  else
+    echo "[OK] no merge conflicts"
+  fi
+
+  if ! command -v codex >/dev/null 2>&1; then
+    echo "[RED] codex: missing"
+    ok=0
+  else
+    echo "[OK] codex"
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "[RED] jq: missing"
+    ok=0
+  else
+    echo "[OK] jq"
+  fi
+
+  if [[ ! -f "$WORKSPACE/AGENTS.md" ]]; then
+    echo "[WARN] AGENTS.md missing (recommended)"
+  else
+    echo "[OK] AGENTS.md present"
+  fi
+
+  if [[ ! -f "$WORKSPACE/RALPH_TASK.md" ]]; then
+    echo "[RED] RALPH_TASK.md missing"
+    ok=0
+  else
+    echo "[OK] RALPH_TASK.md present"
+    local progress
+    progress=$(get_progress "$WORKSPACE" || echo "0|0")
+    echo "[OK] task progress: ${progress%|*}/${progress#*|}"
+  fi
+
+  # Parallel-mode cleanliness: tracked changes must be clean.
+  if ! git -C "$WORKSPACE" diff --quiet || ! git -C "$WORKSPACE" diff --cached --quiet; then
+    echo "[WARN] tracked changes present (parallel runs will refuse to start)"
+  else
+    echo "[OK] tracked tree clean"
+  fi
+
+  echo "[INFO] model preflight: $MODEL"
+  set +e
+  preflight_out=$(
+    (cd "$WORKSPACE" && codex exec --json --sandbox read-only --model "$MODEL" "Reply with OK only.") 2>&1
+  )
+  preflight_rc=$?
+  set -e
+  if [[ "$preflight_rc" -ne 0 ]]; then
+    echo "[RED] model preflight failed for: $MODEL"
+    echo "$preflight_out" | tail -n 15
+    ok=0
+  else
+    echo "[OK] model preflight"
+  fi
+
+  echo ""
+  echo "Next tasks (pending):"
+  get_next_tasks "$WORKSPACE" 3 | awk -F'|' '{printf "- %s (group %s) %s\n  tools: %s\n  test: %s\n  seq: %s deps: %s\n", $1,$3,$4,$6,$7,$8,$9}'
+
+  echo ""
+  echo "Lock:"
+  if [[ -n "$(_lock_meta || true)" ]]; then
+    _lock_meta
+  else
+    echo "(none)"
+  fi
+
+  [[ "$ok" -eq 1 ]] || return 1
+}
+
+status_cmd() {
+  local run_id="${1:-$(_active_run_id)}"
+  if [[ -z "${run_id:-}" ]]; then
+    echo "No runs found."
+    return 0
+  fi
+
+  local dir="$WORKSPACE/.ralph/parallel/$run_id"
+  local meta="$dir/run.meta"
+  local jobs="$dir/jobs.jsonl"
+
+  echo "Run: $run_id"
+  [[ -f "$meta" ]] && sed -n '1,20p' "$meta"
+  [[ -f "$jobs" ]] || { echo "No jobs.jsonl at $jobs"; return 1; }
+
+  jq -s '
+    def count(s): ([.[] | select(.status==s)] | length);
+    {
+      launched: count("JOB_STARTED"),
+      succeeded: count("JOB_SUCCESS"),
+      failed: count("JOB_FAILED"),
+      merged: count("MERGED"),
+      merge_failed: count("MERGE_FAILED"),
+      fixed: count("MERGE_FIX_DONE"),
+      run_started: count("RUN_STARTED"),
+      run_done: count("RUN_DONE"),
+      finalize_ok: count("FINALIZE_MAIN_OK"),
+      finalize_failed: count("FINALIZE_MAIN_FAILED")
+    }
+  ' "$jobs"
+
+  echo ""
+  echo "Recent failures:"
+  jq -r '
+    select(.status=="JOB_FAILED" or .status=="MERGE_FAILED" or .status=="FINALIZE_MAIN_FAILED")
+    | "\(.ts) \(.status) task=\(.task_id // "-") branch=\(.branch // "-") reason=\(.reason // "-")"
+  ' "$jobs" | tail -n 8
+
+  echo ""
+  echo "Active jobs:"
+  jq -s '
+    reduce .[] as $e ({}; if ($e.job_id? and ($e.status|startswith("JOB_"))) then .[($e.job_id|tostring)] = $e else . end)
+    | to_entries
+    | map(select(.value.status=="JOB_STARTED"))
+    | .[:6]
+    | .[]
+    | "\(.value.ts) job=\(.key) task=\(.value.task_id) branch=\(.value.branch)"
+  ' "$jobs" | sed -n '1,20p'
+}
+
+watch_cmd() {
+  local run_id="${1:-$(_active_run_id)}"
+  local interval="${2:-3}"
+  while true; do
+    echo "============================================================"
+    date
+    status_cmd "$run_id" || true
+    echo ""
+    local dir="$WORKSPACE/.ralph/parallel/$run_id"
+    [[ -f "$dir/merge_failures.log" ]] && tail -n 10 "$dir/merge_failures.log" || true
+    sleep "$interval"
+  done
+}
+
+clean_cmd() {
+  local run_id="${1:-$(_active_run_id)}"
+  if [[ -z "${run_id:-}" ]]; then
+    echo "No run id."
+    return 1
+  fi
+
+  echo "Cleaning run: $run_id (preserving logs in .ralph/parallel/$run_id)"
+  rm -rf "$WORKSPACE/.ralph-worktrees/$run_id" >/dev/null 2>&1 || true
+  rm -rf "$WORKSPACE/.ralph/merge-fix/$run_id" >/dev/null 2>&1 || true
+  rm -rf "$WORKSPACE/.ralph/integration/$run_id" >/dev/null 2>&1 || true
+
+  # Remove stale lock if present and dead.
+  local meta="$WORKSPACE/.ralph/lockdir/meta"
+  if [[ -f "$meta" ]]; then
+    local pid
+    pid=$(awk -F= '$1=="pid"{print $2}' "$meta")
+    if [[ -n "$pid" ]] && ! kill -0 "$pid" 2>/dev/null; then
+      rm -rf "$WORKSPACE/.ralph/lockdir" >/dev/null 2>&1 || true
+      echo "Removed stale lock."
+    fi
+  fi
+}
+
+cmd="${1:-}"
+shift || true
+
+case "$cmd" in
+  ""|-h|--help|help)
+    usage
+    ;;
+  doctor)
+    doctor
+    ;;
+  run)
+    "$SCRIPTS_DIR/ralphex-loop.sh" "$@"
+    ;;
+  status)
+    rid=""
+    if [[ "${1:-}" == "--run-id" ]]; then
+      rid="${2:-}"; shift 2 || true
+    fi
+    status_cmd "$rid"
+    ;;
+  watch)
+    rid=""
+    if [[ "${1:-}" == "--run-id" ]]; then
+      rid="${2:-}"; shift 2 || true
+    fi
+    watch_cmd "$rid"
+    ;;
+  resume)
+    [[ "${1:-}" == "--run-id" ]] || { echo "usage: ./ralphex resume --run-id <ID>"; exit 2; }
+    rid="${2:-}"
+    shift 2 || true
+    "$SCRIPTS_DIR/ralphex-loop.sh" --parallel --resume-run "$rid" "$@"
+    ;;
+  repair)
+    [[ "${1:-}" == "--run-id" ]] || { echo "usage: ./ralphex repair --run-id <ID>"; exit 2; }
+    rid="${2:-}"
+    repair_parallel_run "$WORKSPACE" "$rid"
+    ;;
+  clean)
+    rid=""
+    if [[ "${1:-}" == "--run-id" ]]; then
+      rid="${2:-}"; shift 2 || true
+    fi
+    clean_cmd "$rid"
+    ;;
+  *)
+    echo "Unknown command: $cmd" >&2
+    usage
+    exit 2
+    ;;
+esac
+

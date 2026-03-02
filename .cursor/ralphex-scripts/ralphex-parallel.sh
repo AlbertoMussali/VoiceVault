@@ -77,6 +77,8 @@ _run_agent_in_worktree() {
   local task_desc="$5"
   local line_no="$6"
   local job_id="$7"
+  local tools_required="${8:-}"
+  local test_override="${9:-}"
 
   local wt_base="$workspace/.ralph-worktrees/$run_id"
   local wt_dir="$wt_base/job-$job_id"
@@ -100,6 +102,10 @@ _run_agent_in_worktree() {
   local agents_md
   agents_md=$(_read_agents_md_snippet "$wt_dir" || true)
 
+  local default_test
+  default_test=$(extract_test_command "$wt_dir" || true)
+  local requested_test="${test_override:-$default_test}"
+
   local prompt
   prompt=$(cat <<EOT
 You are running in Ralphex parallel mode.
@@ -121,6 +127,9 @@ Rules:
 4. Do NOT commit; leave changes unstaged or staged.
 5. End with a concise summary.
 
+Required tools for this task (if listed): ${tools_required:-"(none listed)"}
+Test command to run for this task (best effort): ${requested_test:-"(none configured)"}
+
 Read these files before acting:
 - AGENTS.md
 - RALPH_TASK.md
@@ -130,7 +139,7 @@ Read these files before acting:
 EOT
 )
 
-  _run_log_json "$jobs_file" --arg run_id "$run_id" --arg job_id "$job_id" --arg task_id "$task_id" --arg branch "$branch" --arg status "STARTED" '{ts:now|todateiso8601, run_id:$run_id, job_id:($job_id|tonumber), task_id:$task_id, branch:$branch, status:$status}'
+  _run_log_json "$jobs_file" --arg run_id "$run_id" --arg job_id "$job_id" --arg task_id "$task_id" --arg branch "$branch" --arg status "JOB_STARTED" --arg tools "$tools_required" --arg test "$requested_test" '{ts:now|todateiso8601, run_id:$run_id, job_id:($job_id|tonumber), task_id:$task_id, branch:$branch, status:$status, tools:$tools, test:$test}'
 
   set +e
   (
@@ -152,7 +161,7 @@ EOT
       if ! git -C "$wt_dir" diff --cached --quiet; then
         if ! git -C "$wt_dir" -c user.name="ralphex" -c user.email="ralphex@local" commit -m "ralphex: complete $task_id" >> "$log_file" 2>&1; then
           echo "FAILED|$task_id|$branch|$wt_dir|commit_failed" > "$status_file"
-          _run_log_json "$jobs_file" --arg run_id "$run_id" --arg job_id "$job_id" --arg task_id "$task_id" --arg branch "$branch" --arg status "FAILED" --arg reason "commit_failed" '{ts:now|todateiso8601, run_id:$run_id, job_id:($job_id|tonumber), task_id:$task_id, branch:$branch, status:$status, reason:$reason}'
+          _run_log_json "$jobs_file" --arg run_id "$run_id" --arg job_id "$job_id" --arg task_id "$task_id" --arg branch "$branch" --arg status "JOB_FAILED" --arg reason "commit_failed" '{ts:now|todateiso8601, run_id:$run_id, job_id:($job_id|tonumber), task_id:$task_id, branch:$branch, status:$status, reason:$reason}'
           return 0
         fi
       fi
@@ -160,11 +169,11 @@ EOT
 
     local sha
     sha=$(git -C "$wt_dir" rev-parse HEAD 2>/dev/null || echo "")
-    echo "SUCCESS|$task_id|$branch|$wt_dir|ok|$sha" > "$status_file"
-    _run_log_json "$jobs_file" --arg run_id "$run_id" --arg job_id "$job_id" --arg task_id "$task_id" --arg branch "$branch" --arg status "SUCCESS" --arg sha "$sha" '{ts:now|todateiso8601, run_id:$run_id, job_id:($job_id|tonumber), task_id:$task_id, branch:$branch, status:$status, sha:$sha}'
+    echo "SUCCESS|$task_id|$branch|$wt_dir|ok|$sha|$tools_required|$requested_test" > "$status_file"
+    _run_log_json "$jobs_file" --arg run_id "$run_id" --arg job_id "$job_id" --arg task_id "$task_id" --arg branch "$branch" --arg status "JOB_SUCCESS" --arg sha "$sha" '{ts:now|todateiso8601, run_id:$run_id, job_id:($job_id|tonumber), task_id:$task_id, branch:$branch, status:$status, sha:$sha}'
   else
     echo "FAILED|$task_id|$branch|$wt_dir|codex_failed" > "$status_file"
-    _run_log_json "$jobs_file" --arg run_id "$run_id" --arg job_id "$job_id" --arg task_id "$task_id" --arg branch "$branch" --arg status "FAILED" --arg reason "codex_failed" '{ts:now|todateiso8601, run_id:$run_id, job_id:($job_id|tonumber), task_id:$task_id, branch:$branch, status:$status, reason:$reason}'
+    _run_log_json "$jobs_file" --arg run_id "$run_id" --arg job_id "$job_id" --arg task_id "$task_id" --arg branch "$branch" --arg status "JOB_FAILED" --arg reason "codex_failed" '{ts:now|todateiso8601, run_id:$run_id, job_id:($job_id|tonumber), task_id:$task_id, branch:$branch, status:$status, reason:$reason}'
   fi
 
   return 0
@@ -345,8 +354,8 @@ resume_parallel_run() {
   local status_file
   for status_file in "$status_dir"/job-*.status; do
     [[ -f "$status_file" ]] || continue
-    local outcome task_id branch wt_dir reason sha
-    IFS='|' read -r outcome task_id branch wt_dir reason sha < "$status_file"
+    local outcome task_id branch wt_dir reason sha tools test_cmd
+    IFS='|' read -r outcome task_id branch wt_dir reason sha tools test_cmd < "$status_file"
     if [[ "$outcome" != "SUCCESS" ]]; then
       continue
     fi
@@ -365,6 +374,73 @@ resume_parallel_run() {
   done
 
   _run_log_json "$jobs_file" --arg run_id "$run_id" --arg status "RESUME_DONE" '{ts:now|todateiso8601, run_id:$run_id, status:$status}'
+  return 0
+}
+
+repair_parallel_run() {
+  local workspace="$1"
+  local run_id="$2"
+
+  local status_dir="$workspace/.ralph/parallel/$run_id"
+  local merge_log="$status_dir/merge.log"
+  local jobs_file="$status_dir/jobs.jsonl"
+  local meta="$status_dir/run.meta"
+
+  [[ -f "$meta" ]] || { echo "No run meta found for run_id=$run_id" >&2; return 1; }
+
+  local integration_branch
+  integration_branch=$(awk -F= '$1=="integration_branch"{print $2}' "$meta")
+  [[ -n "$integration_branch" ]] || { echo "Missing integration_branch in $meta" >&2; return 1; }
+
+  local integration_dir
+  integration_dir="$(_create_integration_worktree "$workspace" "$run_id" "$integration_branch" "$integration_branch")"
+
+  echo "Repairing run: $run_id (integration=$integration_branch)"
+  _run_log_json "$jobs_file" --arg run_id "$run_id" --arg status "REPAIR_STARTED" '{ts:now|todateiso8601, run_id:$run_id, status:$status}'
+
+  local branches
+  branches=$(git -C "$workspace" for-each-ref --format='%(refname:short)' "refs/heads/ralphex/parallel-${run_id}-*" 2>/dev/null || true)
+  if [[ -z "$branches" ]]; then
+    echo "No parallel branches found for run_id=$run_id"
+    return 0
+  fi
+
+  local branch
+  local failed=0
+  while IFS= read -r branch || [[ -n "$branch" ]]; do
+    [[ -z "$branch" ]] && continue
+    local task_id=""
+    if [[ "$branch" =~ (line_[0-9]+) ]]; then
+      task_id="${BASH_REMATCH[1]}"
+    fi
+
+    if _merge_success_branch "$integration_dir" "$branch" "$merge_log"; then
+      [[ -n "$task_id" ]] && _mark_task_complete_in_integration "$integration_dir" "$task_id" "$merge_log"
+      _run_log_json "$jobs_file" --arg run_id "$run_id" --arg task_id "${task_id:-}" --arg branch "$branch" --arg status "MERGED" '{ts:now|todateiso8601, run_id:$run_id, task_id:$task_id, branch:$branch, status:$status}'
+      git -C "$workspace" branch -D "$branch" >/dev/null 2>&1 || true
+      continue
+    fi
+
+    echo "Repair merge failed for $branch" >>"$status_dir/merge_failures.log"
+    _run_log_json "$jobs_file" --arg run_id "$run_id" --arg task_id "${task_id:-}" --arg branch "$branch" --arg status "MERGE_FAILED" '{ts:now|todateiso8601, run_id:$run_id, task_id:$task_id, branch:$branch, status:$status}'
+
+    if _auto_resolve_merge_conflict "$workspace" "$run_id" "$integration_branch" "${task_id:-unknown}" "$branch"; then
+      integration_dir="$(_create_integration_worktree "$workspace" "$run_id" "$integration_branch" "$integration_branch")"
+      [[ -n "$task_id" ]] && _mark_task_complete_in_integration "$integration_dir" "$task_id" "$merge_log"
+      _run_log_json "$jobs_file" --arg run_id "$run_id" --arg task_id "${task_id:-}" --arg branch "$branch" --arg status "MERGED" '{ts:now|todateiso8601, run_id:$run_id, task_id:$task_id, branch:$branch, status:$status}'
+      git -C "$workspace" branch -D "$branch" >/dev/null 2>&1 || true
+    else
+      failed=$((failed + 1))
+      echo "Repair auto-resolve failed for $branch" >>"$status_dir/merge_failures.log"
+    fi
+  done <<<"$branches"
+
+  if [[ "$failed" -gt 0 ]]; then
+    _run_log_json "$jobs_file" --arg run_id "$run_id" --arg status "REPAIR_FAILED" --arg failed "$failed" '{ts:now|todateiso8601, run_id:$run_id, status:$status, failed:($failed|tonumber)}'
+    return 1
+  fi
+
+  _run_log_json "$jobs_file" --arg run_id "$run_id" --arg status "REPAIR_DONE" '{ts:now|todateiso8601, run_id:$run_id, status:$status}'
   return 0
 }
 
@@ -413,6 +489,42 @@ run_parallel_tasks() {
   local job_global=0
   local fatal=0
 
+  _required_tools_missing() {
+    local csv="${1:-}"
+    [[ -z "$csv" ]] && return 1
+    local missing=""
+    local tool
+    for tool in $(echo "$csv" | tr ',' ' '); do
+      [[ -z "$tool" ]] && continue
+      if ! command -v "$tool" >/dev/null 2>&1; then
+        missing="${missing}${missing:+,}$tool"
+      fi
+    done
+    if [[ -n "$missing" ]]; then
+      echo "$missing"
+      return 0
+    fi
+    return 1
+  }
+
+  _deps_satisfied() {
+    local integration_dir="$1"
+    local deps_csv="${2:-}"
+    [[ -z "$deps_csv" ]] && return 0
+    local dep
+    for dep in $(echo "$deps_csv" | tr ',' ' '); do
+      [[ -z "$dep" ]] && continue
+      local row
+      row=$(get_task_by_id "$integration_dir" "$dep" || true)
+      local st
+      st=$(echo "$row" | cut -d'|' -f2)
+      if [[ "$st" != "completed" ]]; then
+        return 1
+      fi
+    done
+    return 0
+  }
+
   while IFS= read -r group || [[ -n "$group" ]]; do
     if [[ "$stop" -eq 1 ]]; then
       break
@@ -420,78 +532,126 @@ run_parallel_tasks() {
     [[ -z "$group" ]] && continue
 
     echo "Processing group $group"
-    local tasks
-    tasks=$(get_tasks_by_group "$integration_dir" "$group" || true)
-    [[ -z "$tasks" ]] && continue
+    local blocked_file="$status_dir/blocked_tasks.txt"
+    touch "$blocked_file"
 
-    local pids=""
-    local group_status_files=""
-
-    while IFS='|' read -r task_id status group_num task_desc line_no || [[ -n "$task_id" ]]; do
-      [[ -z "$task_id" ]] && continue
-      job_global=$((job_global + 1))
-
-      group_status_files="$group_status_files $status_dir/job-$job_global.status"
-      _run_agent_in_worktree "$workspace" "$run_id" "$integration_branch" "$task_id" "$task_desc" "$line_no" "$job_global" &
-      pids="$pids $!"
-      launched_tasks=$((launched_tasks + 1))
-
-      if [[ "$max_tasks" -gt 0 ]] && [[ "$launched_tasks" -ge "$max_tasks" ]]; then
-        stop=1
-      fi
-
-      # Batch by max_parallel (portable for bash 3)
-      if [[ $((job_global % max_parallel)) -eq 0 ]]; then
-        for pid in $pids; do wait "$pid"; done
-        pids=""
-      fi
-
-      if [[ "$stop" -eq 1 ]]; then
+    while true; do
+      if [[ "$fatal" -eq 1 || "$stop" -eq 1 ]]; then
         break
       fi
-    done <<< "$tasks"
 
-    for pid in $pids; do wait "$pid"; done
+      local pending
+      pending=$(get_tasks_by_group "$integration_dir" "$group" || true)
+      [[ -z "$pending" ]] && break
 
-    local status_file
-    for status_file in $group_status_files; do
-      [[ -f "$status_file" ]] || continue
-      local outcome task_id branch wt_dir reason sha
-      IFS='|' read -r outcome task_id branch wt_dir reason sha < "$status_file"
+      local ready_lines=""
+      local seq_line=""
 
-      if [[ "$outcome" == "SUCCESS" ]]; then
-        if _merge_success_branch "$integration_dir" "$branch" "$merge_log"; then
-          _mark_task_complete_in_integration "$integration_dir" "$task_id" "$merge_log"
-          _run_log_json "$jobs_file" --arg run_id "$run_id" --arg task_id "$task_id" --arg branch "$branch" --arg status "MERGED" '{ts:now|todateiso8601, run_id:$run_id, task_id:$task_id, branch:$branch, status:$status}'
-          merged_count=$((merged_count + 1))
-        else
-          echo "Merge failed for $branch" >> "$status_dir/merge_failures.log"
-          if _auto_resolve_merge_conflict "$workspace" "$run_id" "$integration_branch" "$task_id" "$branch"; then
-            integration_dir="$(_create_integration_worktree "$workspace" "$run_id" "$integration_branch" "$integration_branch")"
-            _mark_task_complete_in_integration "$integration_dir" "$task_id" "$merge_log"
-            _run_log_json "$jobs_file" --arg run_id "$run_id" --arg task_id "$task_id" --arg branch "$branch" --arg status "MERGED_AFTER_FIX" '{ts:now|todateiso8601, run_id:$run_id, task_id:$task_id, branch:$branch, status:$status}'
-            merged_count=$((merged_count + 1))
-          else
-            _run_log_json "$jobs_file" --arg run_id "$run_id" --arg task_id "$task_id" --arg branch "$branch" --arg status "MERGE_FAILED" '{ts:now|todateiso8601, run_id:$run_id, task_id:$task_id, branch:$branch, status:$status}'
-            failed_count=$((failed_count + 1))
-            fatal=1
-            stop=1
-          fi
+      while IFS='|' read -r task_id status group_num task_desc line_no tools test_cmd seq deps || [[ -n "$task_id" ]]; do
+        [[ -z "$task_id" ]] && continue
+
+        if grep -Fqx "$task_id" "$blocked_file" 2>/dev/null; then
+          continue
         fi
+
+        if ! _deps_satisfied "$integration_dir" "$deps"; then
+          continue
+        fi
+
+        local missing
+        missing=$(_required_tools_missing "$tools" || true)
+        if [[ -n "$missing" ]]; then
+          echo "$task_id" >>"$blocked_file"
+          echo "$task_id blocked: missing_tool:$missing" >>"$status_dir/failures.log"
+          _run_log_json "$jobs_file" --arg run_id "$run_id" --arg task_id "$task_id" --arg status "JOB_FAILED" --arg reason "missing_tool:$missing" '{ts:now|todateiso8601, run_id:$run_id, task_id:$task_id, status:$status, reason:$reason}'
+          log_error "$workspace" "Task $task_id blocked (missing tool): $missing"
+          log_progress "$workspace" "Blocked $task_id in group $group: missing_tool:$missing"
+          continue
+        fi
+
+        if [[ "$seq" == "true" && -z "$seq_line" ]]; then
+          seq_line="$task_id|$task_desc|$line_no|$tools|$test_cmd"
+        else
+          ready_lines="${ready_lines}${ready_lines:+$'\n'}$task_id|$task_desc|$line_no|$tools|$test_cmd"
+        fi
+      done <<<"$pending"
+
+      local to_launch=""
+      local launch_parallel="$max_parallel"
+      if [[ -n "$seq_line" ]]; then
+        to_launch="$seq_line"
+        launch_parallel=1
       else
-        echo "$task_id failed: $reason" >> "$status_dir/failures.log"
-        _run_log_json "$jobs_file" --arg run_id "$run_id" --arg task_id "$task_id" --arg branch "$branch" --arg status "FAILED" --arg reason "$reason" '{ts:now|todateiso8601, run_id:$run_id, task_id:$task_id, branch:$branch, status:$status, reason:$reason}'
-        failed_count=$((failed_count + 1))
+        to_launch="$ready_lines"
       fi
 
-      _cleanup_worktree "$workspace" "$wt_dir"
-      if [[ "$outcome" == "SUCCESS" ]]; then
+      [[ -z "$to_launch" ]] && break
+
+      local pids=""
+      local group_status_files=""
+      local launched_in_batch=0
+
+      while IFS='|' read -r task_id task_desc line_no tools test_cmd || [[ -n "$task_id" ]]; do
+        [[ -z "$task_id" ]] && continue
+
+        job_global=$((job_global + 1))
+        group_status_files="$group_status_files $status_dir/job-$job_global.status"
+
+        _run_agent_in_worktree "$workspace" "$run_id" "$integration_branch" "$task_id" "$task_desc" "$line_no" "$job_global" "$tools" "$test_cmd" &
+        pids="$pids $!"
+
+        launched_tasks=$((launched_tasks + 1))
+        launched_in_batch=$((launched_in_batch + 1))
+
+        if [[ "$max_tasks" -gt 0 ]] && [[ "$launched_tasks" -ge "$max_tasks" ]]; then
+          stop=1
+        fi
+
+        if [[ "$launched_in_batch" -ge "$launch_parallel" ]]; then
+          break
+        fi
+      done <<<"$to_launch"
+
+      for pid in $pids; do wait "$pid"; done
+
+      local status_file
+      for status_file in $group_status_files; do
+        [[ -f "$status_file" ]] || continue
+        local outcome task_id branch wt_dir reason sha tools test_cmd
+        IFS='|' read -r outcome task_id branch wt_dir reason sha tools test_cmd < "$status_file"
+
+        if [[ "$outcome" == "SUCCESS" ]]; then
+          if _merge_success_branch "$integration_dir" "$branch" "$merge_log"; then
+            _mark_task_complete_in_integration "$integration_dir" "$task_id" "$merge_log"
+            _run_log_json "$jobs_file" --arg run_id "$run_id" --arg task_id "$task_id" --arg branch "$branch" --arg status "MERGED" '{ts:now|todateiso8601, run_id:$run_id, task_id:$task_id, branch:$branch, status:$status}'
+            merged_count=$((merged_count + 1))
+            log_progress "$workspace" "Merged $task_id into $integration_branch (group $group)."
+          else
+            echo "Merge failed for $branch" >>"$status_dir/merge_failures.log"
+            _run_log_json "$jobs_file" --arg run_id "$run_id" --arg task_id "$task_id" --arg branch "$branch" --arg status "MERGE_FAILED" '{ts:now|todateiso8601, run_id:$run_id, task_id:$task_id, branch:$branch, status:$status}'
+            if _auto_resolve_merge_conflict "$workspace" "$run_id" "$integration_branch" "$task_id" "$branch"; then
+              integration_dir="$(_create_integration_worktree "$workspace" "$run_id" "$integration_branch" "$integration_branch")"
+              _mark_task_complete_in_integration "$integration_dir" "$task_id" "$merge_log"
+              _run_log_json "$jobs_file" --arg run_id "$run_id" --arg task_id "$task_id" --arg branch "$branch" --arg status "MERGED" '{ts:now|todateiso8601, run_id:$run_id, task_id:$task_id, branch:$branch, status:$status}'
+              merged_count=$((merged_count + 1))
+              log_progress "$workspace" "Auto-resolved merge and merged $task_id into $integration_branch."
+            else
+              failed_count=$((failed_count + 1))
+              fatal=1
+              stop=1
+              log_error "$workspace" "Fatal: unresolvable merge for $task_id ($branch)."
+              log_progress "$workspace" "Stopped due to unresolvable merge for $task_id ($branch). See $status_dir/merge.log."
+            fi
+          fi
+        else
+          echo "$task_id failed: $reason" >>"$status_dir/failures.log"
+          _run_log_json "$jobs_file" --arg run_id "$run_id" --arg task_id "$task_id" --arg branch "$branch" --arg status "JOB_FAILED" --arg reason "$reason" '{ts:now|todateiso8601, run_id:$run_id, task_id:$task_id, branch:$branch, status:$status, reason:$reason}'
+          failed_count=$((failed_count + 1))
+        fi
+
+        _cleanup_worktree "$workspace" "$wt_dir"
         git -C "$workspace" branch -D "$branch" >/dev/null 2>&1 || true
-      fi
-
-      if [[ "$fatal" -eq 1 ]]; then
-        break
-      fi
+      done
     done
 
     if [[ "$fatal" -eq 1 ]]; then

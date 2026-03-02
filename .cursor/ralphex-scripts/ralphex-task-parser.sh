@@ -3,6 +3,31 @@
 
 set -euo pipefail
 
+_meta_extract() {
+  local meta="$1"
+  local key="$2" # tools|test|seq|deps|group
+  awk -v k="$key" '
+    function ltrim(s) { sub(/^[[:space:]]+/, "", s); return s }
+    function rtrim(s) { sub(/[[:space:]]+$/, "", s); return s }
+    function trim(s) { return rtrim(ltrim(s)) }
+    function extract(key, str,    p, rest) {
+      p = index(str, key)
+      if (p == 0) return ""
+      rest = substr(str, p + length(key))
+      rest = trim(rest)
+      match(rest, /[[:space:]][A-Za-z_]+:[[:space:]]/)
+      if (RSTART > 0) return trim(substr(rest, 1, RSTART - 1))
+      return trim(rest)
+    }
+    {
+      # Normalize: ensure key ends with colon
+      key = k ":"
+      print extract(key, $0)
+      exit
+    }
+  ' <<<"$meta"
+}
+
 _parse_tasks_stream() {
   local workspace="${1:-.}"
   local task_file="$workspace/RALPH_TASK.md"
@@ -19,17 +44,37 @@ _parse_tasks_stream() {
       local status="pending"
       local group="999999"
       local id="line_${line_no}"
+      local meta=""
+      local tools=""
+      local test_cmd=""
+      local seq="false"
+      local deps=""
 
       if [[ "$status_char" == "x" || "$status_char" == "X" ]]; then
         status="completed"
       fi
 
-      if [[ "$line" =~ \<\!--[[:space:]]*group:[[:space:]]*([0-9]+)[[:space:]]*--\> ]]; then
-        group="${BASH_REMATCH[1]}"
+      meta=$(printf '%s\n' "$line" | sed -nE 's/.*<!--[[:space:]]*(.*)[[:space:]]*-->[[:space:]]*$/\1/p' || true)
+      if [[ -n "$meta" ]]; then
+        local g
+        g=$(_meta_extract "$meta" "group" || true)
+        [[ -n "$g" ]] && group="$g"
+
+        tools=$(_meta_extract "$meta" "tools" || true)
+        test_cmd=$(_meta_extract "$meta" "test" || true)
+        deps=$(_meta_extract "$meta" "deps" || true)
+
+        local s
+        s=$(_meta_extract "$meta" "seq" || true)
+        if [[ "$s" =~ ^(true|1|yes)$ ]]; then
+          seq="true"
+        fi
       fi
 
-      desc=$(echo "$desc" | sed -E 's/[[:space:]]*<!--[[:space:]]*group:[[:space:]]*[0-9]+[[:space:]]*-->[[:space:]]*//g')
-      printf '%s|%s|%s|%s|%s\n' "$id" "$status" "$group" "$desc" "$line_no"
+      # Strip trailing metadata comment from description (if present).
+      desc=$(echo "$desc" | sed -E 's/[[:space:]]*<!--[[:space:]]*.*-->[[:space:]]*$//')
+
+      printf '%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$id" "$status" "$group" "$desc" "$line_no" "$tools" "$test_cmd" "$seq" "$deps"
     fi
   done < "$task_file"
 }
@@ -63,6 +108,12 @@ get_tasks_by_group() {
 get_next_task() {
   local workspace="${1:-.}"
   _parse_tasks_stream "$workspace" | awk -F'|' '$2=="pending" {print $1 "|" $4 "|" $5; exit}'
+}
+
+get_next_tasks() {
+  local workspace="${1:-.}"
+  local n="${2:-3}"
+  _parse_tasks_stream "$workspace" | awk -F'|' -v n="$n" '$2=="pending" {print; c++; if (c>=n) exit}'
 }
 
 get_task_by_id() {
