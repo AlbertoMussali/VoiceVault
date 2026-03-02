@@ -178,8 +178,22 @@ status_cmd() {
   local jobs="$dir/jobs.jsonl"
 
   echo "Run: $run_id"
-  [[ -f "$meta" ]] && sed -n '1,20p' "$meta"
+  local integration_branch=""
+  local base_ref=""
+  if [[ -f "$meta" ]]; then
+    sed -n '1,20p' "$meta"
+    integration_branch=$(awk -F= '$1=="integration_branch"{print $2}' "$meta" 2>/dev/null || true)
+    base_ref=$(awk -F= '$1=="base_ref"{print $2}' "$meta" 2>/dev/null || true)
+  fi
   [[ -f "$jobs" ]] || { echo "No jobs.jsonl at $jobs"; return 1; }
+
+  if [[ -n "$integration_branch" && -n "$base_ref" ]]; then
+    if git -C "$WORKSPACE" show-ref --verify --quiet "refs/heads/$integration_branch" && git -C "$WORKSPACE" show-ref --verify --quiet "refs/heads/$base_ref"; then
+      ahead=$(git -C "$WORKSPACE" rev-list --count "$base_ref..$integration_branch" 2>/dev/null || echo 0)
+      behind=$(git -C "$WORKSPACE" rev-list --count "$integration_branch..$base_ref" 2>/dev/null || echo 0)
+      echo "Branch delta: $integration_branch ahead=$ahead behind=$behind vs $base_ref"
+    fi
+  fi
 
   jq -s '
     def count(s): ([.[] | select(.status==s)] | length);
@@ -305,4 +319,3 @@ case "$cmd" in
     exit 2
     ;;
 esac
-
