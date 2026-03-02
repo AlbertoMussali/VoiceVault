@@ -26,6 +26,7 @@ class MigrationWiringTests(unittest.TestCase):
         versions = ROOT / "alembic" / "versions"
         migration_files = [path.name for path in versions.glob("*.py")]
         self.assertIn("20260301_0001_create_migration_probe.py", migration_files)
+        self.assertIn("20260302_0002_create_audit_log.py", migration_files)
 
 
 if __name__ == "__main__":
