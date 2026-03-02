@@ -126,7 +126,7 @@ Notes:
 
 ## Phase 2 — Audio capture (web), upload, transcription pipeline (v0 usable)
 
-- [ ] [FE] Build recording UI with MediaRecorder (webm blob, timer). <!-- group: 300 -->
+- [x] [FE] Build recording UI with MediaRecorder (webm blob, timer). <!-- group: 300 -->
   - Done when: user can record/stop and obtain a playable blob.
 - [ ] [BE] Implement `POST /entries` to create an entry shell. <!-- group: 300 -->
   - Done when: returns `entry_id`; entry stored with correct initial status.
