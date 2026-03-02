@@ -54,6 +54,7 @@ _create_integration_worktree() {
     echo "integration_branch=$integration_branch"
     echo "base_ref=$base_ref"
     echo "created_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    echo "runner_version=$(git -C "$workspace" rev-parse --short HEAD 2>/dev/null || echo unknown)"
   } >"$status_dir/run.meta"
 
   if [[ -d "$integration_dir" ]]; then
