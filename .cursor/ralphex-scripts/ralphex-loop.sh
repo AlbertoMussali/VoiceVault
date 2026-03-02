@@ -99,6 +99,8 @@ acquire_lock() {
   local mode="$3"
   local lockdir="$workspace/.ralph/lockdir"
   local meta="$lockdir/meta"
+  local cleanup_cmd
+  printf -v cleanup_cmd 'rm -rf %q >/dev/null 2>&1 || true' "$lockdir"
 
   if mkdir "$lockdir" 2>/dev/null; then
     {
@@ -107,7 +109,7 @@ acquire_lock() {
       echo "mode=$mode"
       echo "started_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     } >"$meta"
-    trap 'rm -rf "$lockdir" >/dev/null 2>&1 || true' EXIT INT TERM
+    trap "$cleanup_cmd" EXIT INT TERM
     return 0
   fi
 
@@ -126,7 +128,7 @@ acquire_lock() {
       echo "mode=$mode"
       echo "started_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     } >"$meta"
-    trap 'rm -rf "$lockdir" >/dev/null 2>&1 || true' EXIT INT TERM
+    trap "$cleanup_cmd" EXIT INT TERM
     return 0
   fi
 
