@@ -35,6 +35,262 @@ _progress_event() {
   ui_emit_standard_event "$status_dir" "$run_id" "$group" "$task_id" "$stage" "$event" "$level" "$message" "$meta_json" || true
 }
 
+_slot_map_add() {
+  local map_file="$1"
+  local task_id="$2"
+  local slot_id="$3"
+  local start_ts="$4"
+  printf '%s|%s|%s\n' "$task_id" "$slot_id" "$start_ts" >>"$map_file"
+}
+
+_slot_map_get() {
+  local map_file="$1"
+  local task_id="$2"
+  awk -F'|' -v t="$task_id" '$1==t{print $2 "|" $3; exit}' "$map_file" 2>/dev/null || true
+}
+
+_slot_map_remove() {
+  local map_file="$1"
+  local task_id="$2"
+  local tmp="${map_file}.tmp"
+  awk -F'|' -v t="$task_id" '$1!=t{print}' "$map_file" >"$tmp" 2>/dev/null || true
+  mv "$tmp" "$map_file" 2>/dev/null || true
+}
+
+_summary_fallback_md() {
+  local title="$1"
+  local group="$2"
+  local elapsed="$3"
+  local diff_names="$4"
+  local log_lines="$5"
+  local task_changes="$6"
+  cat <<EOT
+## $title
+
+### What changed
+$diff_names
+
+### Task coverage
+$task_changes
+
+### Risks/notes
+- Auto-generated fallback summary (LLM unavailable or timed out).
+
+### Validation state
+- Not evaluated in summary stage.
+
+### Next action
+- Review commits and run validation if needed.
+
+_Elapsed: ${elapsed}s${group:+ | group $group}_
+EOT
+}
+
+_extract_agent_text_from_json_stream() {
+  local json_file="$1"
+  jq -rs '
+    map(select(.type=="item.completed" and .item.type=="agent_message") | .item.text // "")
+    | map(select(length>0))
+    | join("\n\n")
+  ' "$json_file" 2>/dev/null || true
+}
+
+_generate_summary_with_agent() {
+  local workspace="$1"
+  local prompt="$2"
+  local timeout_sec="${3:-45}"
+  local tmp_json
+  tmp_json="$(mktemp)"
+  local out=""
+  set +e
+  (
+    cd "$workspace" || exit 1
+    codex exec --json --sandbox read-only --model "$MODEL" "$prompt"
+  ) >"$tmp_json" 2>&1
+  local rc=$?
+  set -e
+  if [[ "$rc" -eq 0 ]]; then
+    out="$(_extract_agent_text_from_json_stream "$tmp_json")"
+  fi
+  rm -f "$tmp_json" >/dev/null 2>&1 || true
+  printf '%s' "$out"
+}
+
+summarize_group_changes_with_agent() {
+  local workspace="$1"
+  local run_id="$2"
+  local group="$3"
+  local status_dir="$4"
+  local base_sha="$5"
+  local head_sha="$6"
+  local elapsed_secs="${7:-0}"
+  local jobs_file="$status_dir/jobs.jsonl"
+  local summary_dir="$status_dir/summaries"
+  local summary_path="$summary_dir/group-${group}.md"
+  mkdir -p "$summary_dir"
+
+  local diff_names log_lines task_changes outcomes
+  diff_names=$(git -C "$workspace" diff --name-status "$base_sha..$head_sha" 2>/dev/null | sed -n '1,80p')
+  log_lines=$(git -C "$workspace" log --oneline "$base_sha..$head_sha" 2>/dev/null | sed -n '1,80p')
+  task_changes=$(git -C "$workspace" diff --unified=0 "$base_sha..$head_sha" -- RALPHEX_TASK.md RALPH_TASK.md 2>/dev/null | sed -n '1,120p')
+  outcomes=$(jq -r --arg g "$group" 'select(.group==$g) | [.status, (.task_id // "-"), (.reason // "-")] | @tsv' "$jobs_file" 2>/dev/null | sed -n '1,120p')
+
+  local prompt
+  prompt=$(cat <<EOT
+Create a concise markdown execution summary.
+Output sections exactly:
+## What changed
+## Task coverage
+## Risks/notes
+## Validation state
+## Next action
+
+Context:
+- Run ID: $run_id
+- Group: $group
+- Base SHA: $base_sha
+- Head SHA: $head_sha
+- Elapsed seconds: $elapsed_secs
+
+Git diff (name-status):
+$diff_names
+
+Git log:
+$log_lines
+
+Task file delta:
+$task_changes
+
+Group job outcomes:
+$outcomes
+EOT
+)
+
+  local summary_text
+  summary_text=$(_generate_summary_with_agent "$workspace" "$prompt")
+  if [[ -z "${summary_text//[[:space:]]/}" ]]; then
+    summary_text=$(_summary_fallback_md "Group $group Summary" "$group" "$elapsed_secs" "${diff_names:-"- none -"}" "${log_lines:-"- none -"}" "${task_changes:-"- none -"}")
+  fi
+  printf '%s\n' "$summary_text" >"$summary_path"
+  _progress_event "$status_dir" "$run_id" "$group" "" "summary" "GROUP_SUMMARY_READY" "info" "group summary ready" "$(jq -nc --arg summary_path "$summary_path" '{summary_path:$summary_path}')"
+  _ui_prefix "Group $group" "Summary ready: $summary_path"
+}
+
+summarize_run_changes_with_agent() {
+  local workspace="$1"
+  local run_id="$2"
+  local status_dir="$3"
+  local run_base_sha="$4"
+  local run_head_sha="$5"
+  local elapsed_secs="${6:-0}"
+  local jobs_file="$status_dir/jobs.jsonl"
+  local summary_dir="$status_dir/summaries"
+  local summary_path="$summary_dir/final.md"
+  mkdir -p "$summary_dir"
+
+  local diff_names log_lines task_changes outcomes
+  diff_names=$(git -C "$workspace" diff --name-status "$run_base_sha..$run_head_sha" 2>/dev/null | sed -n '1,200p')
+  log_lines=$(git -C "$workspace" log --oneline "$run_base_sha..$run_head_sha" 2>/dev/null | sed -n '1,200p')
+  task_changes=$(git -C "$workspace" diff --unified=0 "$run_base_sha..$run_head_sha" -- RALPHEX_TASK.md RALPH_TASK.md 2>/dev/null | sed -n '1,200p')
+  outcomes=$(jq -r '[.status, (.group // "-"), (.task_id // "-"), (.reason // "-")] | @tsv' "$jobs_file" 2>/dev/null | sed -n '1,200p')
+
+  local prompt
+  prompt=$(cat <<EOT
+Create a concise markdown final run summary.
+Output sections exactly:
+## What changed
+## Task coverage
+## Risks/notes
+## Validation state
+## Next action
+
+Context:
+- Run ID: $run_id
+- Base SHA: $run_base_sha
+- Head SHA: $run_head_sha
+- Elapsed seconds: $elapsed_secs
+
+Git diff (name-status):
+$diff_names
+
+Git log:
+$log_lines
+
+Task file delta:
+$task_changes
+
+Run job outcomes:
+$outcomes
+EOT
+)
+
+  local summary_text
+  summary_text=$(_generate_summary_with_agent "$workspace" "$prompt")
+  if [[ -z "${summary_text//[[:space:]]/}" ]]; then
+    summary_text=$(_summary_fallback_md "Final Run Summary" "" "$elapsed_secs" "${diff_names:-"- none -"}" "${log_lines:-"- none -"}" "${task_changes:-"- none -"}")
+  fi
+  printf '%s\n' "$summary_text" >"$summary_path"
+  _progress_event "$status_dir" "$run_id" "" "" "summary" "RUN_SUMMARY_READY" "info" "run summary ready" "$(jq -nc --arg summary_path "$summary_path" '{summary_path:$summary_path}')"
+  _ui_prefix "Summary" "Final summary ready: $summary_path"
+}
+
+_sync_group_slot_updates() {
+  local progress_file="$1"
+  local cursor="${2:-0}"
+  local map_file="$3"
+  local group="$4"
+  local total
+  total=$(wc -l <"$progress_file" 2>/dev/null | tr -d ' ')
+  [[ "$total" =~ ^[0-9]+$ ]] || total=0
+  [[ "$cursor" =~ ^[0-9]+$ ]] || cursor=0
+  if [[ "$total" -le "$cursor" ]]; then
+    echo "$cursor"
+    return 0
+  fi
+
+  local now
+  now=$(date +%s 2>/dev/null || echo 0)
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -n "$line" ]] || continue
+    local ev_group task_id event stage message level
+    ev_group=$(jq -r '.group // ""' <<<"$line" 2>/dev/null || echo "")
+    [[ "$ev_group" == "$group" ]] || continue
+    task_id=$(jq -r '.task_id // ""' <<<"$line" 2>/dev/null || echo "")
+    [[ -n "$task_id" ]] || continue
+    event=$(jq -r '.event // ""' <<<"$line" 2>/dev/null || echo "")
+    stage=$(jq -r '.stage // ""' <<<"$line" 2>/dev/null || echo "")
+    message=$(jq -r '.message // ""' <<<"$line" 2>/dev/null || echo "")
+    level=$(jq -r '.level // "info"' <<<"$line" 2>/dev/null || echo "info")
+    local slot_info
+    slot_info=$(_slot_map_get "$map_file" "$task_id")
+    [[ -n "$slot_info" ]] || continue
+    local slot_id start_ts elapsed
+    slot_id=$(echo "$slot_info" | cut -d'|' -f1)
+    start_ts=$(echo "$slot_info" | cut -d'|' -f2)
+    [[ "$start_ts" =~ ^[0-9]+$ ]] || start_ts="$now"
+    elapsed=$((now - start_ts))
+    (( elapsed < 0 )) && elapsed=0
+    case "$event" in
+      TASK_HEARTBEAT)
+        ui_slot_update "$slot_id" "running" "$message" "$level" "$elapsed"
+        ;;
+      MERGE_FIX_STARTED|MERGE_FIX_PROGRESS)
+        ui_slot_update "$slot_id" "merge-fix" "$message" "$level" "$elapsed"
+        ;;
+      MERGE_FIX_FAILED)
+        ui_slot_update "$slot_id" "merge-fix" "$message" "error" "$elapsed"
+        ;;
+      TASK_RESULT)
+        if [[ "$stage" == "task" ]]; then
+          ui_slot_update "$slot_id" "finishing" "$message" "$level" "$elapsed"
+        fi
+        ;;
+    esac
+  done < <(sed -n "$((cursor + 1)),$total p" "$progress_file" 2>/dev/null)
+
+  echo "$total"
+}
+
 _read_agents_md_snippet() {
   local dir="$1"
   local f="$dir/AGENTS.md"
@@ -94,6 +350,7 @@ _run_agent_in_worktree() {
   local job_id="$7"
   local tools_required="${8:-}"
   local test_override="${9:-}"
+  local slot_id="${10:-0}"
 
   local wt_base
   wt_base="$(ralphex_worktrees_dir "$workspace")/$run_id"
@@ -113,7 +370,7 @@ _run_agent_in_worktree() {
   task_group=$(echo "$task_row" | cut -d'|' -f3)
 
   if ! git -C "$workspace" worktree add -f -b "$branch" "$wt_dir" "$base_ref" > "$log_file" 2>&1; then
-    echo "FAILED|$task_id|$branch|$wt_dir|worktree_create" > "$status_file"
+    echo "FAILED|$task_id|$branch|$wt_dir|worktree_create||||$slot_id" > "$status_file"
     _run_log_json "$jobs_file" --arg run_id "$run_id" --arg job_id "$job_id" --arg task_id "$task_id" --arg branch "$branch" --arg status "FAILED" --arg reason "worktree_create" '{ts:now|todateiso8601, run_id:$run_id, job_id:($job_id|tonumber), task_id:$task_id, branch:$branch, status:$status, reason:$reason}'
     _progress_event "$status_dir" "$run_id" "$task_group" "$task_id" "task" "TASK_RESULT" "error" "task failed: worktree create"
     return 0
@@ -162,7 +419,7 @@ EOT
 )
 
   _run_log_json "$jobs_file" --arg run_id "$run_id" --arg job_id "$job_id" --arg task_id "$task_id" --arg branch "$branch" --arg status "JOB_STARTED" --arg tools "$tools_required" --arg test "$requested_test" '{ts:now|todateiso8601, run_id:$run_id, job_id:($job_id|tonumber), task_id:$task_id, branch:$branch, status:$status, tools:$tools, test:$test}'
-  _progress_event "$status_dir" "$run_id" "$task_group" "$task_id" "task" "TASK_STARTED" "info" "task started" "$(jq -nc --arg branch "$branch" --arg tools "$tools_required" --arg test "$requested_test" '{branch:$branch,tools:$tools,test:$test}')"
+  _progress_event "$status_dir" "$run_id" "$task_group" "$task_id" "task" "TASK_STARTED" "info" "task started" "$(jq -nc --arg branch "$branch" --arg tools "$tools_required" --arg test "$requested_test" --arg task_label "$task_id" --arg slot_id "$slot_id" '{branch:$branch,tools:$tools,test:$test,task_label:$task_label,slot_id:($slot_id|tonumber)}')"
 
   set +e
   (
@@ -191,7 +448,7 @@ EOT
       git -C "$wt_dir" reset -q -- .ralphex .ralph 2>/dev/null || true
       if ! git -C "$wt_dir" diff --cached --quiet; then
         if ! git -C "$wt_dir" -c user.name="ralphex" -c user.email="ralphex@local" commit -m "ralphex: complete $task_id" >> "$log_file" 2>&1; then
-          echo "FAILED|$task_id|$branch|$wt_dir|commit_failed" > "$status_file"
+          echo "FAILED|$task_id|$branch|$wt_dir|commit_failed||||$slot_id" > "$status_file"
           _run_log_json "$jobs_file" --arg run_id "$run_id" --arg job_id "$job_id" --arg task_id "$task_id" --arg branch "$branch" --arg status "JOB_FAILED" --arg reason "commit_failed" '{ts:now|todateiso8601, run_id:$run_id, job_id:($job_id|tonumber), task_id:$task_id, branch:$branch, status:$status, reason:$reason}'
           _progress_event "$status_dir" "$run_id" "$task_group" "$task_id" "task" "TASK_RESULT" "error" "task failed: commit failed" "$(jq -nc --arg reason "commit_failed" '{reason:$reason}')"
           return 0
@@ -201,11 +458,11 @@ EOT
 
     local sha
     sha=$(git -C "$wt_dir" rev-parse HEAD 2>/dev/null || echo "")
-    echo "SUCCESS|$task_id|$branch|$wt_dir|ok|$sha|$tools_required|$requested_test" > "$status_file"
+    echo "SUCCESS|$task_id|$branch|$wt_dir|ok|$sha|$tools_required|$requested_test|$slot_id" > "$status_file"
     _run_log_json "$jobs_file" --arg run_id "$run_id" --arg job_id "$job_id" --arg task_id "$task_id" --arg branch "$branch" --arg status "JOB_SUCCESS" --arg sha "$sha" '{ts:now|todateiso8601, run_id:$run_id, job_id:($job_id|tonumber), task_id:$task_id, branch:$branch, status:$status, sha:$sha}'
     _progress_event "$status_dir" "$run_id" "$task_group" "$task_id" "task" "TASK_RESULT" "info" "task completed" "$(jq -nc --arg branch "$branch" --arg sha "$sha" '{branch:$branch,sha:$sha}')"
   else
-    echo "FAILED|$task_id|$branch|$wt_dir|codex_failed" > "$status_file"
+    echo "FAILED|$task_id|$branch|$wt_dir|codex_failed||||$slot_id" > "$status_file"
     _run_log_json "$jobs_file" --arg run_id "$run_id" --arg job_id "$job_id" --arg task_id "$task_id" --arg branch "$branch" --arg status "JOB_FAILED" --arg reason "codex_failed" '{ts:now|todateiso8601, run_id:$run_id, job_id:($job_id|tonumber), task_id:$task_id, branch:$branch, status:$status, reason:$reason}'
     _progress_event "$status_dir" "$run_id" "$task_group" "$task_id" "task" "TASK_RESULT" "error" "task failed: codex failed" "$(jq -nc --arg reason "codex_failed" '{reason:$reason}')"
   fi
@@ -448,6 +705,9 @@ resume_parallel_run() {
   _ui_prefix "Plan" "Resuming run $run_id with group-barrier orchestrator"
   _run_log_json "$jobs_file" --arg run_id "$run_id" --arg status "RESUME_STARTED" '{ts:now|todateiso8601, run_id:$run_id, status:$status}'
   _progress_event "$status_dir" "$run_id" "" "" "plan" "RUN_RESUMED" "info" "resume started"
+  local resume_start_sha resume_start_ts
+  resume_start_sha=$(git -C "$workspace" rev-parse HEAD 2>/dev/null || echo "")
+  resume_start_ts=$(date +%s 2>/dev/null || echo 0)
 
   local group
   while IFS= read -r group || [[ -n "$group" ]]; do
@@ -460,9 +720,17 @@ resume_parallel_run() {
     fi
 
     local group_mode group_counts
+    local group_start_sha group_start_ts
+    group_start_sha=$(git -C "$workspace" rev-parse HEAD 2>/dev/null || echo "")
+    group_start_ts=$(date +%s 2>/dev/null || echo 0)
     group_mode=$(ui_detect_group_mode "$workspace" "$group" "3")
     group_counts=$(ui_print_group_plan "$workspace" "$group" "0" | tail -n 1)
     ui_print_group_start "$group" "$group_mode" "$group_counts"
+    local group_pending_for_slots
+    group_pending_for_slots=$(echo "$group_counts" | jq -r '.pending // 0')
+    [[ "$group_pending_for_slots" -gt 3 ]] && group_pending_for_slots=3
+    [[ "$group_pending_for_slots" -lt 1 ]] && group_pending_for_slots=1
+    ui_slots_init "$group_pending_for_slots" "$run_id" "$status_dir"
     record_orchestrator_event "$jobs_file" "$run_id" "$group" "GROUP_STARTED"
 
     local integration_pair
@@ -475,9 +743,18 @@ resume_parallel_run() {
     success_lines=$(collect_group_success_branches "$workspace" "$run_id" "$group" "$status_dir" || true)
     while IFS='|' read -r task_id branch _wt_dir _sha || [[ -n "$task_id" ]]; do
       [[ -z "$task_id" ]] && continue
+      local slot_id
+      slot_id=$(ui_slot_acquire)
+      if [[ "$slot_id" =~ ^[0-9]+$ ]] && [[ "$slot_id" -gt 0 ]]; then
+        ui_slot_bind "$slot_id" "$task_id" "$group" "$task_id"
+      fi
       if ! _merge_success_branch "$integration_dir" "$branch" "$status_dir/merge.log"; then
         if ! _auto_resolve_merge_conflict "$workspace" "$run_id" "$integration_branch" "$task_id" "$branch"; then
           ui_print_group_task_result "$task_id" "failed" "resume_merge_failed"
+          if [[ "${slot_id:-0}" =~ ^[0-9]+$ ]] && [[ "$slot_id" -gt 0 ]]; then
+            ui_slot_release "$slot_id" "failed"
+          fi
+          ui_slots_stop
           record_orchestrator_event "$jobs_file" "$run_id" "$group" "GROUP_FAILED" '{"reason":"resume_merge_failed"}'
           _progress_event "$status_dir" "$run_id" "$group" "$task_id" "task" "TASK_RESULT" "error" "resume merge failed"
           return 1
@@ -485,21 +762,33 @@ resume_parallel_run() {
         integration_dir="$(_create_integration_worktree "$workspace" "$run_id" "$integration_branch" "$integration_branch")"
       fi
       ui_print_group_task_result "$task_id" "merged"
+      if [[ "${slot_id:-0}" =~ ^[0-9]+$ ]] && [[ "$slot_id" -gt 0 ]]; then
+        ui_slot_release "$slot_id" "merged"
+      fi
       _mark_task_complete_in_integration "$integration_dir" "$task_id" "$status_dir/merge.log"
     done <<<"$success_lines"
 
     record_orchestrator_event "$jobs_file" "$run_id" "$group" "GROUP_TASKS_DONE"
     if ! orchestrate_group_parallel "$workspace" "$run_id" "$group" "$base_ref" "$integration_branch" "$status_dir"; then
+      ui_slots_stop
       _ui_prefix "Group $group" "Stopped: orchestrator failed (fail-closed)"
       record_orchestrator_event "$jobs_file" "$run_id" "$group" "GROUP_FAILED" '{"reason":"orchestrator_failed"}'
       return 1
     fi
+    ui_slots_stop
     ui_print_group_done "$group" '{"merged":0,"failed":0,"blocked":0}'
     record_orchestrator_event "$jobs_file" "$run_id" "$group" "GROUP_COMPLETED"
+    local group_elapsed
+    group_elapsed=$(( $(date +%s 2>/dev/null || echo 0) - group_start_ts ))
+    summarize_group_changes_with_agent "$workspace" "$run_id" "$group" "$status_dir" "$group_start_sha" "$(git -C "$workspace" rev-parse HEAD 2>/dev/null || echo "$group_start_sha")" "$group_elapsed"
   done <<<"$groups"
 
   _run_log_json "$jobs_file" --arg run_id "$run_id" --arg status "RESUME_DONE" '{ts:now|todateiso8601, run_id:$run_id, status:$status}'
   _progress_event "$status_dir" "$run_id" "" "" "summary" "RUN_DONE" "info" "resume completed"
+  local resume_head_sha resume_elapsed
+  resume_head_sha=$(git -C "$workspace" rev-parse HEAD 2>/dev/null || echo "$resume_start_sha")
+  resume_elapsed=$(( $(date +%s 2>/dev/null || echo 0) - resume_start_ts ))
+  summarize_run_changes_with_agent "$workspace" "$run_id" "$status_dir" "$resume_start_sha" "$resume_head_sha" "$resume_elapsed"
   return 0
 }
 
@@ -521,6 +810,9 @@ repair_parallel_run() {
   _ui_prefix "Plan" "Repairing run $run_id from first incomplete group barrier"
   _run_log_json "$jobs_file" --arg run_id "$run_id" --arg status "REPAIR_STARTED" '{ts:now|todateiso8601, run_id:$run_id, status:$status}'
   _progress_event "$status_dir" "$run_id" "" "" "plan" "RUN_REPAIRED" "info" "repair started"
+  local repair_start_sha repair_start_ts
+  repair_start_sha=$(git -C "$workspace" rev-parse HEAD 2>/dev/null || echo "")
+  repair_start_ts=$(date +%s 2>/dev/null || echo 0)
 
   local groups
   groups=$(get_pending_groups "$workspace" || true)
@@ -534,9 +826,13 @@ repair_parallel_run() {
     fi
 
     local group_mode group_counts
+    local group_start_sha group_start_ts
+    group_start_sha=$(git -C "$workspace" rev-parse HEAD 2>/dev/null || echo "")
+    group_start_ts=$(date +%s 2>/dev/null || echo 0)
     group_mode=$(ui_detect_group_mode "$workspace" "$group" "3")
     group_counts=$(ui_print_group_plan "$workspace" "$group" "0" | tail -n 1)
     ui_print_group_start "$group" "$group_mode" "$group_counts"
+    ui_slots_init 1 "$run_id" "$status_dir"
 
     local integration_pair
     integration_pair=$(create_group_integration_worktree "$workspace" "$run_id" "$group" "$base_ref" "$status_dir")
@@ -544,9 +840,14 @@ repair_parallel_run() {
     integration_branch=$(echo "$integration_pair" | cut -d'|' -f1)
 
     if orchestrate_group_parallel "$workspace" "$run_id" "$group" "$base_ref" "$integration_branch" "$status_dir"; then
+      ui_slots_stop
       ui_print_group_done "$group" '{"merged":0,"failed":0,"blocked":0}'
       record_orchestrator_event "$jobs_file" "$run_id" "$group" "GROUP_COMPLETED"
+      local group_elapsed
+      group_elapsed=$(( $(date +%s 2>/dev/null || echo 0) - group_start_ts ))
+      summarize_group_changes_with_agent "$workspace" "$run_id" "$group" "$status_dir" "$group_start_sha" "$(git -C "$workspace" rev-parse HEAD 2>/dev/null || echo "$group_start_sha")" "$group_elapsed"
     else
+      ui_slots_stop
       _ui_prefix "Group $group" "Stopped: repair orchestrator failed"
       record_orchestrator_event "$jobs_file" "$run_id" "$group" "GROUP_FAILED" '{"reason":"repair_orchestrator_failed"}'
       _run_log_json "$jobs_file" --arg run_id "$run_id" --arg status "REPAIR_FAILED" '{ts:now|todateiso8601, run_id:$run_id, status:$status}'
@@ -557,6 +858,10 @@ repair_parallel_run() {
 
   _run_log_json "$jobs_file" --arg run_id "$run_id" --arg status "REPAIR_DONE" '{ts:now|todateiso8601, run_id:$run_id, status:$status}'
   _progress_event "$status_dir" "$run_id" "" "" "summary" "RUN_DONE" "info" "repair completed"
+  local repair_head_sha repair_elapsed
+  repair_head_sha=$(git -C "$workspace" rev-parse HEAD 2>/dev/null || echo "$repair_start_sha")
+  repair_elapsed=$(( $(date +%s 2>/dev/null || echo 0) - repair_start_ts ))
+  summarize_run_changes_with_agent "$workspace" "$run_id" "$status_dir" "$repair_start_sha" "$repair_head_sha" "$repair_elapsed"
   return 0
 }
 
@@ -579,7 +884,13 @@ run_parallel_tasks() {
   status_dir="$(ralphex_state_dir "$workspace")/parallel/$run_id"
   local merge_log="$status_dir/merge.log"
   local jobs_file="$status_dir/jobs.jsonl"
+  local progress_file="$status_dir/progress.jsonl"
   mkdir -p "$status_dir"
+  touch "$progress_file"
+
+  local run_start_sha run_start_ts
+  run_start_sha=$(git -C "$workspace" rev-parse HEAD 2>/dev/null || echo "")
+  run_start_ts=$(date +%s 2>/dev/null || echo 0)
 
   {
     echo "run_id=$run_id"
@@ -671,6 +982,10 @@ run_parallel_tasks() {
     fi
     [[ -z "$group" ]] && continue
 
+    local group_start_sha group_start_ts
+    group_start_sha=$(git -C "$workspace" rev-parse HEAD 2>/dev/null || echo "")
+    group_start_ts=$(date +%s 2>/dev/null || echo 0)
+
     local group_mode group_counts
     group_mode=$(ui_detect_group_mode "$workspace" "$group" "$max_parallel")
     group_counts=$(ui_print_group_plan "$workspace" "$group" "0" | tail -n 1)
@@ -684,9 +999,21 @@ run_parallel_tasks() {
     integration_dir=$(echo "$integration_pair" | cut -d'|' -f2)
 
     local blocked_file="$status_dir/blocked_tasks.txt"
+    local slot_map_file="$status_dir/group-${group}.slots"
+    : >"$slot_map_file"
     touch "$blocked_file"
     local merged_in_group=0
     local blocked_in_group=0
+    local group_progress_cursor=0
+    local group_pending_for_slots
+    group_pending_for_slots=$(echo "$group_counts" | jq -r '.pending // 0')
+    if [[ "$group_pending_for_slots" -gt "$max_parallel" ]]; then
+      group_pending_for_slots="$max_parallel"
+    fi
+    if [[ "$group_pending_for_slots" -lt 1 ]]; then
+      group_pending_for_slots=1
+    fi
+    ui_slots_init "$group_pending_for_slots" "$run_id" "$status_dir"
 
     while true; do
       if [[ "$fatal" -eq 1 || "$stop" -eq 1 ]]; then
@@ -753,8 +1080,17 @@ run_parallel_tasks() {
 
         job_global=$((job_global + 1))
         group_status_files="$group_status_files $status_dir/job-$job_global.status"
+        local slot_id slot_start_ts
+        slot_id=$(ui_slot_acquire)
+        if [[ "$slot_id" =~ ^[0-9]+$ ]] && [[ "$slot_id" -gt 0 ]]; then
+          ui_slot_bind "$slot_id" "$task_id" "$group" "$task_id"
+          slot_start_ts=$(date +%s 2>/dev/null || echo 0)
+          _slot_map_add "$slot_map_file" "$task_id" "$slot_id" "$slot_start_ts"
+        else
+          slot_id=0
+        fi
 
-        _run_agent_in_worktree "$workspace" "$run_id" "$integration_branch" "$task_id" "$task_desc" "$line_no" "$job_global" "$tools" "$test_cmd" &
+        _run_agent_in_worktree "$workspace" "$run_id" "$integration_branch" "$task_id" "$task_desc" "$line_no" "$job_global" "$tools" "$test_cmd" "$slot_id" &
         pids="$pids $!"
 
         launched_tasks=$((launched_tasks + 1))
@@ -769,13 +1105,29 @@ run_parallel_tasks() {
         fi
       done <<<"$to_launch"
 
+      while true; do
+        local alive=0
+        local pid
+        for pid in $pids; do
+          if kill -0 "$pid" >/dev/null 2>&1; then
+            alive=1
+            break
+          fi
+        done
+        group_progress_cursor=$(_sync_group_slot_updates "$progress_file" "$group_progress_cursor" "$slot_map_file" "$group")
+        if [[ "$alive" -eq 0 ]]; then
+          break
+        fi
+        sleep 1
+      done
       for pid in $pids; do wait "$pid"; done
+      group_progress_cursor=$(_sync_group_slot_updates "$progress_file" "$group_progress_cursor" "$slot_map_file" "$group")
 
       local status_file
       for status_file in $group_status_files; do
         [[ -f "$status_file" ]] || continue
-        local outcome task_id branch wt_dir reason sha tools test_cmd
-        IFS='|' read -r outcome task_id branch wt_dir reason sha tools test_cmd < "$status_file"
+        local outcome task_id branch wt_dir reason sha tools test_cmd slot_id
+        IFS='|' read -r outcome task_id branch wt_dir reason sha tools test_cmd slot_id < "$status_file"
 
         if [[ "$outcome" == "SUCCESS" ]]; then
           if _merge_success_branch "$integration_dir" "$branch" "$merge_log"; then
@@ -786,6 +1138,10 @@ run_parallel_tasks() {
             merged_in_group=$((merged_in_group + 1))
             log_progress "$workspace" "Merged $task_id into $integration_branch (group $group)."
             ui_print_group_task_result "$task_id" "merged"
+            if [[ "${slot_id:-0}" =~ ^[0-9]+$ ]] && [[ "$slot_id" -gt 0 ]]; then
+              ui_slot_release "$slot_id" "merged"
+              _slot_map_remove "$slot_map_file" "$task_id"
+            fi
           else
             echo "Merge failed for $branch" >>"$status_dir/merge_failures.log"
             _run_log_json "$jobs_file" --arg run_id "$run_id" --arg task_id "$task_id" --arg branch "$branch" --arg status "MERGE_FAILED" '{ts:now|todateiso8601, run_id:$run_id, task_id:$task_id, branch:$branch, status:$status}'
@@ -799,6 +1155,10 @@ run_parallel_tasks() {
               merged_in_group=$((merged_in_group + 1))
               log_progress "$workspace" "Auto-resolved merge and merged $task_id into $integration_branch."
               ui_print_group_task_result "$task_id" "merged" "after-merge-fix"
+              if [[ "${slot_id:-0}" =~ ^[0-9]+$ ]] && [[ "$slot_id" -gt 0 ]]; then
+                ui_slot_release "$slot_id" "merged-after-merge-fix"
+                _slot_map_remove "$slot_map_file" "$task_id"
+              fi
             else
               failed_count=$((failed_count + 1))
               fatal=1
@@ -807,6 +1167,10 @@ run_parallel_tasks() {
               log_progress "$workspace" "Stopped due to unresolvable merge for $task_id ($branch). See $status_dir/merge.log."
               ui_print_group_task_result "$task_id" "failed" "unresolvable_merge"
               _progress_event "$status_dir" "$run_id" "$group" "$task_id" "task" "TASK_RESULT" "error" "task failed: unresolvable merge" "$(jq -nc --arg branch "$branch" '{branch:$branch,reason:"unresolvable_merge"}')"
+              if [[ "${slot_id:-0}" =~ ^[0-9]+$ ]] && [[ "$slot_id" -gt 0 ]]; then
+                ui_slot_release "$slot_id" "failed"
+                _slot_map_remove "$slot_map_file" "$task_id"
+              fi
             fi
           fi
         else
@@ -815,16 +1179,25 @@ run_parallel_tasks() {
           failed_count=$((failed_count + 1))
           ui_print_group_task_result "$task_id" "failed" "$reason"
           _progress_event "$status_dir" "$run_id" "$group" "$task_id" "task" "TASK_RESULT" "error" "task failed: $reason" "$(jq -nc --arg reason "$reason" '{reason:$reason}')"
+          if [[ "${slot_id:-0}" =~ ^[0-9]+$ ]] && [[ "$slot_id" -gt 0 ]]; then
+            ui_slot_release "$slot_id" "failed"
+            _slot_map_remove "$slot_map_file" "$task_id"
+          fi
         fi
 
         _cleanup_worktree "$workspace" "$wt_dir"
       done
     done
 
+    ui_slots_stop
+
     if [[ "$fatal" -eq 1 ]]; then
       groups_failed=$((groups_failed + 1))
       record_orchestrator_event "$jobs_file" "$run_id" "$group" "GROUP_FAILED" '{"reason":"group_task_merge_failed"}'
       _ui_prefix "Group $group" "Stopped: fatal task merge failure before orchestrator."
+      local group_elapsed_fail
+      group_elapsed_fail=$(( $(date +%s 2>/dev/null || echo 0) - group_start_ts ))
+      summarize_group_changes_with_agent "$workspace" "$run_id" "$group" "$status_dir" "$group_start_sha" "$(git -C "$workspace" rev-parse HEAD 2>/dev/null || echo "$group_start_sha")" "$group_elapsed_fail"
       break
     fi
 
@@ -846,6 +1219,9 @@ run_parallel_tasks() {
     groups_completed=$((groups_completed + 1))
     ui_print_group_done "$group" "{\"merged\":$merged_in_group,\"failed\":0,\"blocked\":$blocked_in_group}"
     record_orchestrator_event "$jobs_file" "$run_id" "$group" "GROUP_COMPLETED"
+    local group_elapsed
+    group_elapsed=$(( $(date +%s 2>/dev/null || echo 0) - group_start_ts ))
+    summarize_group_changes_with_agent "$workspace" "$run_id" "$group" "$status_dir" "$group_start_sha" "$(git -C "$workspace" rev-parse HEAD 2>/dev/null || echo "$group_start_sha")" "$group_elapsed"
   done <<< "$groups"
 
   _ui_prefix "Summary" "Execution summary: launched=$launched_tasks merged=$merged_count failed=$failed_count blocked=$blocked_count"
@@ -888,6 +1264,10 @@ run_parallel_tasks() {
   ui_print_final_summary "$run_id" "$aggregate_json"
   _progress_event "$status_dir" "$run_id" "" "" "summary" "RUN_SUMMARY" "info" "run summary emitted" "$aggregate_json"
   _progress_event "$status_dir" "$run_id" "" "" "summary" "RUN_DONE" "$([[ "$failed_count" -gt 0 ]] && echo error || echo info)" "run completed"
+  local run_head_sha run_elapsed
+  run_head_sha=$(git -C "$workspace" rev-parse HEAD 2>/dev/null || echo "$run_start_sha")
+  run_elapsed=$(( $(date +%s 2>/dev/null || echo 0) - run_start_ts ))
+  summarize_run_changes_with_agent "$workspace" "$run_id" "$status_dir" "$run_start_sha" "$run_head_sha" "$run_elapsed"
 
   if [[ "$failed_count" -gt 0 ]]; then
     return 1

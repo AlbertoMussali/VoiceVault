@@ -11,6 +11,7 @@ RALPHEX_UI_SH_LOADED=1
 RALPHEX_LIVE_PROGRESS="${RALPHEX_LIVE_PROGRESS:-1}"
 RALPHEX_NO_LIVE="${RALPHEX_NO_LIVE:-0}"
 RALPHEX_REASONING_SUMMARY="${RALPHEX_REASONING_SUMMARY:-1}"
+RALPHEX_LIVE_SLOTS="${RALPHEX_LIVE_SLOTS:-1}"
 
 UI_LIVE_ENABLED=0
 UI_LIVE_LAST_LEN=0
@@ -18,6 +19,19 @@ UI_LIVE_ACTIVE=0
 UI_LIVE_WIDTH=120
 UI_LIVE_LAST_LINE=""
 UI_LIVE_START_TS=0
+
+UI_SLOTS_ENABLED=0
+UI_SLOTS_COUNT=0
+UI_SLOTS_RENDERED=0
+UI_SLOTS_LAST_RENDER_SEC=0
+UI_SLOTS_MIN_RENDER_INTERVAL_SEC=1
+declare -a UI_SLOT_GROUP
+declare -a UI_SLOT_TASK
+declare -a UI_SLOT_LABEL
+declare -a UI_SLOT_PHASE
+declare -a UI_SLOT_MSG
+declare -a UI_SLOT_LEVEL
+declare -a UI_SLOT_ELAPSED
 
 _ui_now_iso() {
   date -u '+%Y-%m-%dT%H:%M:%SZ'
@@ -149,9 +163,164 @@ ui_live_stop() {
   UI_LIVE_LAST_LEN=0
 }
 
+ui_slots_init() {
+  local max_slots="${1:-0}"
+  local _run_id="${2:-}"
+  local _status_dir="${3:-}"
+  UI_SLOTS_ENABLED=0
+  UI_SLOTS_COUNT=0
+  UI_SLOTS_RENDERED=0
+  UI_SLOTS_LAST_RENDER_SEC=0
+
+  if [[ "$RALPHEX_LIVE_SLOTS" != "1" || "$RALPHEX_LIVE_PROGRESS" != "1" || "$RALPHEX_NO_LIVE" == "1" ]]; then
+    return 0
+  fi
+  if [[ ! -t 1 || "${TERM:-dumb}" == "dumb" ]]; then
+    return 0
+  fi
+  [[ "$max_slots" =~ ^[0-9]+$ ]] || max_slots=0
+  if [[ "$max_slots" -le 0 ]]; then
+    return 0
+  fi
+
+  UI_SLOTS_ENABLED=1
+  UI_SLOTS_COUNT="$max_slots"
+  local i
+  for ((i=1; i<=UI_SLOTS_COUNT; i++)); do
+    UI_SLOT_GROUP[$i]="-"
+    UI_SLOT_TASK[$i]="-"
+    UI_SLOT_LABEL[$i]="idle"
+    UI_SLOT_PHASE[$i]="idle"
+    UI_SLOT_MSG[$i]="waiting"
+    UI_SLOT_LEVEL[$i]="info"
+    UI_SLOT_ELAPSED[$i]=0
+  done
+  ui_slots_render force
+}
+
+ui_slot_acquire() {
+  [[ "$UI_SLOTS_ENABLED" -eq 1 ]] || { echo "0"; return 0; }
+  local i
+  for ((i=1; i<=UI_SLOTS_COUNT; i++)); do
+    if [[ "${UI_SLOT_TASK[$i]:--}" == "-" ]]; then
+      echo "$i"
+      return 0
+    fi
+  done
+  echo "0"
+}
+
+ui_slot_bind() {
+  local slot_id="$1"
+  local task_id="$2"
+  local group="$3"
+  local label="$4"
+  [[ "$UI_SLOTS_ENABLED" -eq 1 ]] || return 0
+  [[ "$slot_id" =~ ^[0-9]+$ ]] || return 0
+  if [[ "$slot_id" -lt 1 || "$slot_id" -gt "$UI_SLOTS_COUNT" ]]; then
+    return 0
+  fi
+  UI_SLOT_GROUP[$slot_id]="${group:--}"
+  UI_SLOT_TASK[$slot_id]="${task_id:--}"
+  UI_SLOT_LABEL[$slot_id]="${label:-$task_id}"
+  UI_SLOT_PHASE[$slot_id]="running"
+  UI_SLOT_MSG[$slot_id]="starting"
+  UI_SLOT_LEVEL[$slot_id]="info"
+  UI_SLOT_ELAPSED[$slot_id]=0
+  ui_slots_render
+}
+
+ui_slot_update() {
+  local slot_id="$1"
+  local phase="$2"
+  local message="$3"
+  local level="${4:-info}"
+  local elapsed_secs="${5:-0}"
+  [[ "$UI_SLOTS_ENABLED" -eq 1 ]] || return 0
+  [[ "$slot_id" =~ ^[0-9]+$ ]] || return 0
+  if [[ "$slot_id" -lt 1 || "$slot_id" -gt "$UI_SLOTS_COUNT" ]]; then
+    return 0
+  fi
+  UI_SLOT_PHASE[$slot_id]="$(_ui_sanitize_text "${phase:-running}" 24)"
+  UI_SLOT_MSG[$slot_id]="$(_ui_sanitize_text "${message:-working}" 120)"
+  UI_SLOT_LEVEL[$slot_id]="$(_ui_sanitize_text "${level:-info}" 10)"
+  if [[ "$elapsed_secs" =~ ^[0-9]+$ ]]; then
+    UI_SLOT_ELAPSED[$slot_id]="$elapsed_secs"
+  fi
+  ui_slots_render
+}
+
+ui_slot_release() {
+  local slot_id="$1"
+  local result="${2:-done}"
+  [[ "$UI_SLOTS_ENABLED" -eq 1 ]] || return 0
+  [[ "$slot_id" =~ ^[0-9]+$ ]] || return 0
+  if [[ "$slot_id" -lt 1 || "$slot_id" -gt "$UI_SLOTS_COUNT" ]]; then
+    return 0
+  fi
+  UI_SLOT_PHASE[$slot_id]="done"
+  UI_SLOT_MSG[$slot_id]="$(_ui_sanitize_text "$result" 120)"
+  UI_SLOT_LEVEL[$slot_id]="info"
+  UI_SLOT_TASK[$slot_id]="-"
+  UI_SLOT_LABEL[$slot_id]="idle"
+  UI_SLOT_GROUP[$slot_id]="-"
+  UI_SLOT_ELAPSED[$slot_id]=0
+  ui_slots_render force
+}
+
+ui_slots_render() {
+  local mode="${1:-normal}"
+  [[ "$UI_SLOTS_ENABLED" -eq 1 ]] || return 0
+  local now
+  now=$(date +%s 2>/dev/null || echo 0)
+  if [[ "$mode" != "force" && "$UI_SLOTS_LAST_RENDER_SEC" -gt 0 ]]; then
+    if [[ $((now - UI_SLOTS_LAST_RENDER_SEC)) -lt "$UI_SLOTS_MIN_RENDER_INTERVAL_SEC" ]]; then
+      return 0
+    fi
+  fi
+
+  if [[ "$UI_SLOTS_RENDERED" -eq 1 ]]; then
+    printf '\033[%sA' "$UI_SLOTS_COUNT"
+  fi
+  local i
+  for ((i=1; i<=UI_SLOTS_COUNT; i++)); do
+    local elapsed="${UI_SLOT_ELAPSED[$i]:-0}"
+    [[ "$elapsed" =~ ^[0-9]+$ ]] || elapsed=0
+    local elapsed_fmt
+    elapsed_fmt=$(printf '%02d:%02d' $((elapsed/60)) $((elapsed%60)))
+    local line="[A${i}] g${UI_SLOT_GROUP[$i]:--} ${UI_SLOT_LABEL[$i]:-idle} | ${UI_SLOT_PHASE[$i]:-idle} | ${UI_SLOT_MSG[$i]:-waiting} | ${elapsed_fmt} | ${UI_SLOT_LEVEL[$i]:-info}"
+    line="$(_ui_sanitize_text "$line" 220)"
+    printf '\r\033[2K%s\n' "$line"
+  done
+  UI_SLOTS_RENDERED=1
+  UI_SLOTS_LAST_RENDER_SEC="$now"
+}
+
+ui_slots_flush() {
+  if [[ "$UI_SLOTS_ENABLED" -eq 1 && "$UI_SLOTS_RENDERED" -eq 1 ]]; then
+    printf '\033[%sA' "$UI_SLOTS_COUNT"
+    local i
+    for ((i=1; i<=UI_SLOTS_COUNT; i++)); do
+      printf '\r\033[2K\n'
+    done
+    printf '\033[%sA' "$UI_SLOTS_COUNT"
+    UI_SLOTS_RENDERED=0
+  fi
+}
+
+ui_slots_stop() {
+  if [[ "$UI_SLOTS_ENABLED" -eq 1 ]]; then
+    ui_slots_render force
+  fi
+  UI_SLOTS_ENABLED=0
+  UI_SLOTS_COUNT=0
+  UI_SLOTS_RENDERED=0
+}
+
 _ui_prefix() {
   local stage="$1"
   shift || true
+  ui_slots_flush
   ui_live_flush_line
   echo "[$stage] $*"
 }

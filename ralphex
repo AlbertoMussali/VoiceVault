@@ -301,6 +301,18 @@ status_cmd() {
     tail -n "$tail_n" "$progress" | jq -r '"\(.ts) [\(.stage)] \(.event) \(.message)"' 2>/dev/null || tail -n "$tail_n" "$progress"
   fi
 
+  local summaries_dir="$dir/summaries"
+  if [[ -d "$summaries_dir" ]]; then
+    echo ""
+    echo "Summary artifacts:"
+    local final_summary="$summaries_dir/final.md"
+    if [[ -f "$final_summary" ]]; then
+      echo "final: $final_summary"
+      echo "final_mtime: $(date -r "$final_summary" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo unknown)"
+    fi
+    ls -1 "$summaries_dir"/group-*.md 2>/dev/null | sort | tail -n 5 | sed 's/^/group: /'
+  fi
+
   echo ""
   echo "Group status:"
   jq -s '
