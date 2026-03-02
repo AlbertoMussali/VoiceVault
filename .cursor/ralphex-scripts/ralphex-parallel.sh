@@ -189,6 +189,12 @@ run_parallel_tasks() {
       if [[ "$outcome" == "SUCCESS" ]]; then
         if _merge_success_branch "$workspace" "$branch" "$merge_log"; then
           mark_task_complete "$workspace" "$task_id" || true
+          # Keep workspace clean so subsequent merges don't fail due to local
+          # checkbox edits in RALPH_TASK.md.
+          if ! git -C "$workspace" diff --quiet -- RALPH_TASK.md 2>/dev/null; then
+            git -C "$workspace" add RALPH_TASK.md >/dev/null 2>&1 || true
+            git -C "$workspace" -c user.name="ralphex" -c user.email="ralphex@local" commit -m "ralphex: mark $task_id complete" >>"$merge_log" 2>&1 || true
+          fi
           merged_count=$((merged_count + 1))
         else
           echo "Merge failed for $branch" >> "$status_dir/merge_failures.log"
