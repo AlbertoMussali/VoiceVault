@@ -94,7 +94,7 @@ Notes:
   - Done when: CI runs on PR/commit and is green on main branch.
 - [x] [BE] Wire Alembic migrations and DB connectivity end-to-end. <!-- group: 100 -->
   - Done when: `alembic upgrade head` runs in container against compose Postgres.
-- [ ] [FE] Set up Tailwind + shadcn/ui, router, TanStack Query client. <!-- group: 100 -->
+- [x] [FE] Set up Tailwind + shadcn/ui, router, TanStack Query client. <!-- group: 100 -->
   - Done when: basic styled UI components render, no build warnings.
 - [x] [QA] Define project “Definition of Done” and minimal smoke plan in `docs/`. <!-- group: 100 -->
   - Done when: includes required tests per layer and “how to run locally”.
