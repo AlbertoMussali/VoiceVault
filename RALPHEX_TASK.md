@@ -147,11 +147,11 @@ Notes:
 
 ## Phase 3 — Entry detail, transcript versioning, and “5-second indexing”
 
-- [ ] [BE] Implement transcript versioning: `PATCH /entries/{id}/transcript` creates version+1. <!-- group: 400 -->
+- [x] [BE] Implement transcript versioning: `PATCH /entries/{id}/transcript` creates version+1. <!-- group: 400 -->
   - Done when: old transcript preserved; new version becomes active.
-- [ ] [FE] Implement entry detail page: audio player + transcript display. <!-- group: 400 -->
+- [x] [FE] Implement entry detail page: audio player + transcript display. <!-- group: 400 -->
   - Done when: entry renders reliably and is navigable from timeline/search.
-- [ ] [FE] Implement “Edit transcript” mode that creates a new transcript version. <!-- group: 400 -->
+- [x] [FE] Implement “Edit transcript” mode that creates a new transcript version. <!-- group: 400 -->
   - Done when: edits persist; version increments; UI indicates edited status.
 - [ ] [FE] Implement 5-second indexing modal post-transcription (type, context, tags). <!-- group: 400 -->
   - Done when: user can classify Win/Blocker/etc + Work/Life + tags.

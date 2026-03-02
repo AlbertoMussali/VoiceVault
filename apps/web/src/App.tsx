@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from 'react-router-dom';
 
 import { ProtectedRoute } from '@/auth/ProtectedRoute';
 import { AppPage } from '@/pages/AppPage';
+import { EntryDetailPage } from '@/pages/EntryDetailPage';
 import { LoginPage } from '@/pages/LoginPage';
 import { SignupPage } from '@/pages/SignupPage';
 
@@ -12,6 +13,7 @@ export default function App() {
       <Route path="/signup" element={<SignupPage />} />
       <Route element={<ProtectedRoute />}>
         <Route path="/app" element={<AppPage />} />
+        <Route path="/app/entries/:entryId" element={<EntryDetailPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/login" replace />} />
     </Routes>

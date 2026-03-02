@@ -13,6 +13,20 @@ export type EntryStatusResponse = {
   status: string | null;
 };
 
+export type TranscriptResponse = {
+  text: string;
+  version: number | null;
+  source: string | null;
+};
+
+export type EntryDetail = EntryStatusResponse & {
+  transcript: TranscriptResponse | null;
+  transcriptText: string | null;
+  audioUrl: string | null;
+};
+
+export type EntryDetailResponse = EntryDetail;
+
 export class EntryApiError extends ApiError {
   readonly errorCode?: string;
   readonly errorType?: string;
@@ -77,7 +91,25 @@ async function parseResponsePayload(response: Response): Promise<unknown> {
   return response.text();
 }
 
-async function authorizedFetch(path: string, init: RequestInit, retry = true): Promise<unknown> {
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+
+  return value as Record<string, unknown>;
+}
+
+function pickString(...values: unknown[]): string | null {
+  for (const value of values) {
+    if (typeof value === 'string') {
+      return value;
+    }
+  }
+
+  return null;
+}
+
+async function authorizedRequest(path: string, init: RequestInit, retry = true): Promise<Response> {
   const headers = new Headers(init.headers ?? {});
   const token = getAccessToken();
   if (token) {
@@ -93,10 +125,15 @@ async function authorizedFetch(path: string, init: RequestInit, retry = true): P
   if (response.status === 401 && retry) {
     const refreshed = await refreshSession();
     if (refreshed) {
-      return authorizedFetch(path, init, false);
+      return authorizedRequest(path, init, false);
     }
   }
 
+  return response;
+}
+
+async function authorizedFetch(path: string, init: RequestInit): Promise<unknown> {
+  const response = await authorizedRequest(path, init);
   const payload = await parseResponsePayload(response);
   if (!response.ok) {
     throw new EntryApiError(parseErrorMessage(payload, 'Request failed.'), response.status, parseErrorContract(payload));
@@ -116,13 +153,103 @@ function pickEntryId(payload: unknown): string | null {
 }
 
 function pickEntryStatus(payload: unknown): string | null {
+  const data = asRecord(payload);
+  if (!data) {
+    return null;
+  }
+
+  return pickString(data.status);
+}
+
+function pickTranscriptText(payload: unknown): string | null {
+  const root = asRecord(payload);
+  if (!root) {
+    return null;
+  }
+
+  const direct = pickString(root.transcript_text, root.transcriptText, root.transcript);
+  if (direct) {
+    return direct;
+  }
+
+  const currentTranscript = asRecord(root.current_transcript) ?? asRecord(root.currentTranscript) ?? asRecord(root.transcript);
+  if (currentTranscript) {
+    const current = pickString(currentTranscript.transcript_text, currentTranscript.transcriptText, currentTranscript.text);
+    if (current) {
+      return current;
+    }
+  }
+
+  const transcriptList = root.transcripts;
+  if (!Array.isArray(transcriptList)) {
+    return null;
+  }
+
+  const currentVersion = transcriptList.find((value) => asRecord(value)?.is_current === true);
+  const selected = asRecord(currentVersion) ?? asRecord(transcriptList[0]);
+  if (!selected) {
+    return null;
+  }
+
+  return pickString(selected.transcript_text, selected.transcriptText, selected.text);
+}
+
+function pickAudioUrl(payload: unknown): string | null {
+  const root = asRecord(payload);
+  if (!root) {
+    return null;
+  }
+
+  const direct = pickString(root.audio_url, root.audioUrl);
+  if (direct) {
+    return direct;
+  }
+
+  const audioRecord = asRecord(root.audio) ?? asRecord(root.audio_asset) ?? asRecord(root.audioAsset);
+  if (!audioRecord) {
+    return null;
+  }
+
+  return pickString(audioRecord.url, audioRecord.audio_url, audioRecord.audioUrl);
+}
+
+function parseTranscriptPayload(payload: unknown): TranscriptResponse | null {
   if (!payload || typeof payload !== 'object') {
     return null;
   }
 
   const data = payload as Record<string, unknown>;
-  const value = data.status;
-  return typeof value === 'string' ? value : null;
+  const textValue = data.transcript_text ?? data.text ?? data.content;
+  const versionValue = data.version;
+  const sourceValue = data.source;
+
+  if (typeof textValue !== 'string') {
+    return null;
+  }
+
+  return {
+    text: textValue,
+    version: typeof versionValue === 'number' ? versionValue : null,
+    source: typeof sourceValue === 'string' ? sourceValue : null
+  };
+}
+
+function pickCurrentTranscript(payload: unknown): TranscriptResponse | null {
+  if (!payload || typeof payload !== 'object') {
+    return null;
+  }
+
+  const data = payload as Record<string, unknown>;
+  const nestedTranscript =
+    parseTranscriptPayload(data.transcript) ??
+    parseTranscriptPayload(data.current_transcript) ??
+    parseTranscriptPayload(data.currentTranscript);
+
+  if (nestedTranscript) {
+    return nestedTranscript;
+  }
+
+  return parseTranscriptPayload(data);
 }
 
 export async function createEntry(): Promise<EntryStatusResponse> {
@@ -158,4 +285,51 @@ export async function fetchEntryStatus(entryId: string): Promise<EntryStatusResp
     entryId: resolvedEntryId,
     status: pickEntryStatus(payload)
   };
+}
+
+export async function fetchEntryDetail(entryId: string): Promise<EntryDetail> {
+  const payload = await authorizedFetch(`/api/v1/entries/${entryId}`, { method: 'GET' });
+  const transcript = pickCurrentTranscript(payload);
+
+  return {
+    entryId: pickEntryId(payload) ?? entryId,
+    status: pickEntryStatus(payload),
+    transcript,
+    transcriptText: transcript?.text ?? pickTranscriptText(payload),
+    audioUrl: pickAudioUrl(payload)
+  };
+}
+
+export async function fetchEntryAudioBlob(entryId: string): Promise<Blob | null> {
+  const response = await authorizedRequest(`/api/v1/entries/${entryId}/audio`, {
+    method: 'GET'
+  });
+
+  if (response.status === 404 || response.status === 405) {
+    return null;
+  }
+
+  if (!response.ok) {
+    const payload = await parseResponsePayload(response);
+    throw new EntryApiError(parseErrorMessage(payload, 'Failed to load entry audio.'), response.status, parseErrorContract(payload));
+  }
+
+  return response.blob();
+}
+
+export async function updateEntryTranscript(entryId: string, transcriptText: string): Promise<TranscriptResponse> {
+  const payload = await authorizedFetch(`/api/v1/entries/${entryId}/transcript`, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ transcript_text: transcriptText })
+  });
+
+  const transcript = pickCurrentTranscript(payload);
+  if (!transcript) {
+    throw new ApiError('Transcript update response did not include transcript data.', 500);
+  }
+
+  return transcript;
 }

@@ -5,7 +5,9 @@ import hashlib
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from pydantic import BaseModel, Field
 from jwt import InvalidTokenError
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.datastructures import UploadFile
@@ -14,11 +16,17 @@ from app.auth import decode_token
 from app.db import get_db
 from app.jobs import enqueue_registered_job
 from app.errors import ApiContractError, ErrorType
-from app.models import AuditLog, AudioAsset, Entry, User
+from app.models import AuditLog, AudioAsset, Entry, Transcript, User
 from app.settings import get_settings
 from app.storage import get_storage_backend
 
 router = APIRouter(prefix="/api/v1/entries", tags=["entries"])
+
+
+class TranscriptPatchRequest(BaseModel):
+    transcript_text: str = Field(min_length=1)
+    language_code: str | None = Field(default=None, max_length=16)
+    source: str = Field(default="user_edit", min_length=1, max_length=32)
 
 
 def _extract_bearer_token(request: Request) -> str:
@@ -101,6 +109,65 @@ def list_entries() -> dict[str, list[dict[str, str]]]:
 @router.get("/{entry_id}")
 def get_entry(entry_id: uuid.UUID) -> dict[str, str]:
     return {"entry_id": str(entry_id)}
+
+
+@router.patch("/{entry_id}/transcript")
+def patch_entry_transcript(
+    entry_id: uuid.UUID,
+    payload: TranscriptPatchRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, str | int | bool | None]:
+    entry = db.get(Entry, entry_id)
+    if entry is None:
+        raise ApiContractError(
+            status_code=status.HTTP_404_NOT_FOUND,
+            error_code="ENTRY_NOT_FOUND",
+            message="Entry not found.",
+            error_type=ErrorType.FATAL,
+        )
+
+    max_version = db.execute(select(func.max(Transcript.version)).where(Transcript.entry_id == entry_id)).scalar_one_or_none()
+    if max_version is None:
+        raise ApiContractError(
+            status_code=status.HTTP_409_CONFLICT,
+            error_code="TRANSCRIPT_MISSING",
+            message="Cannot patch transcript before initial transcription exists.",
+            error_type=ErrorType.FATAL,
+        )
+
+    current_transcript = (
+        db.execute(
+            select(Transcript)
+            .where(Transcript.entry_id == entry_id, Transcript.is_current.is_(True))
+            .order_by(Transcript.version.desc())
+            .limit(1)
+        )
+        .scalars()
+        .first()
+    )
+    next_version = int(max_version) + 1
+
+    db.execute(update(Transcript).where(Transcript.entry_id == entry_id).values(is_current=False))
+    new_transcript = Transcript(
+        entry_id=entry_id,
+        version=next_version,
+        is_current=True,
+        transcript_text=payload.transcript_text,
+        language_code=payload.language_code if payload.language_code is not None else (current_transcript.language_code if current_transcript else None),
+        source=payload.source,
+    )
+    db.add(new_transcript)
+    db.commit()
+    db.refresh(new_transcript)
+
+    return {
+        "entry_id": str(entry_id),
+        "transcript_id": str(new_transcript.id),
+        "version": new_transcript.version,
+        "is_current": new_transcript.is_current,
+        "language_code": new_transcript.language_code,
+        "source": new_transcript.source,
+    }
 
 
 @router.post("/{entry_id}/audio", status_code=status.HTTP_201_CREATED)

@@ -3,7 +3,14 @@ import { useNavigate } from 'react-router-dom';
 
 import { useAuth } from '@/auth/AuthProvider';
 import { Button } from '@/components/ui/Button';
-import { EntryApiError, createEntry, fetchEntryStatus, uploadEntryAudio } from '@/lib/entries';
+import {
+  EntryApiError,
+  createEntry,
+  fetchEntryDetail,
+  fetchEntryStatus,
+  updateEntryTranscript,
+  uploadEntryAudio
+} from '@/lib/entries';
 
 type PipelineState = 'idle' | 'creating' | 'uploading' | 'transcribing' | 'ready' | 'error';
 type RetryAction = 'restart_pipeline' | 'retry_upload' | 'resume_polling' | null;
@@ -54,6 +61,14 @@ export function AppPage() {
   const [entryStatus, setEntryStatus] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [retryAction, setRetryAction] = useState<RetryAction>(null);
+  const [entryTranscript, setEntryTranscript] = useState<string | null>(null);
+  const [transcriptVersion, setTranscriptVersion] = useState<number | null>(null);
+  const [isTranscriptEdited, setIsTranscriptEdited] = useState(false);
+  const [isEditingTranscript, setIsEditingTranscript] = useState(false);
+  const [transcriptDraft, setTranscriptDraft] = useState('');
+  const [isSavingTranscript, setIsSavingTranscript] = useState(false);
+  const [transcriptError, setTranscriptError] = useState<string | null>(null);
+  const [transcriptNotice, setTranscriptNotice] = useState<string | null>(null);
   const pollTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -85,6 +100,36 @@ export function AppPage() {
     if (pollTimerRef.current !== null) {
       window.clearInterval(pollTimerRef.current);
       pollTimerRef.current = null;
+    }
+  }
+
+  function resetTranscriptState() {
+    setEntryTranscript(null);
+    setTranscriptVersion(null);
+    setIsTranscriptEdited(false);
+    setIsEditingTranscript(false);
+    setTranscriptDraft('');
+    setTranscriptError(null);
+    setTranscriptNotice(null);
+  }
+
+  async function refreshEntryDetail(targetEntryId: string) {
+    const detail = await fetchEntryDetail(targetEntryId);
+    if (detail.status) {
+      setEntryStatus(detail.status);
+    }
+
+    if (!detail.transcript) {
+      return;
+    }
+
+    setEntryTranscript(detail.transcript.text);
+    setTranscriptVersion(detail.transcript.version);
+    const editedByVersion = detail.transcript.version !== null && detail.transcript.version > 1;
+    const editedBySource = detail.transcript.source !== null && detail.transcript.source !== 'stt';
+    setIsTranscriptEdited(editedByVersion || editedBySource);
+    if (!isEditingTranscript) {
+      setTranscriptDraft(detail.transcript.text);
     }
   }
 
@@ -198,6 +243,9 @@ export function AppPage() {
     setSelectedFile(file);
     setErrorMessage(null);
     setRetryAction(null);
+    setTranscriptError(null);
+    setTranscriptNotice(null);
+    setIsEditingTranscript(false);
   }
 
   async function pollUntilComplete(nextEntryId: string) {
@@ -214,6 +262,7 @@ export function AppPage() {
           setPipelineState('ready');
           setRetryAction(null);
           stopPolling();
+          await refreshEntryDetail(nextEntryId);
           return false;
         }
 
@@ -306,6 +355,7 @@ export function AppPage() {
         setEntryId(null);
         setEntryStatus(null);
         setPipelineState('creating');
+        resetTranscriptState();
 
         const created = await createEntry();
         currentEntryId = created.entryId;
@@ -349,6 +399,55 @@ export function AppPage() {
       setRetryAction(null);
       setPipelineState('transcribing');
       await pollUntilComplete(entryId);
+    }
+  }
+
+  function handleStartTranscriptEdit() {
+    if (!entryTranscript) {
+      return;
+    }
+
+    setTranscriptDraft(entryTranscript);
+    setTranscriptError(null);
+    setTranscriptNotice(null);
+    setIsEditingTranscript(true);
+  }
+
+  function handleCancelTranscriptEdit() {
+    setIsEditingTranscript(false);
+    setTranscriptDraft(entryTranscript ?? '');
+    setTranscriptError(null);
+  }
+
+  async function handleSaveTranscriptEdit() {
+    if (!entryId) {
+      setTranscriptError('Entry id is missing.');
+      return;
+    }
+
+    const nextText = transcriptDraft.trim();
+    if (!nextText) {
+      setTranscriptError('Transcript cannot be empty.');
+      return;
+    }
+
+    setIsSavingTranscript(true);
+    setTranscriptError(null);
+    setTranscriptNotice(null);
+
+    try {
+      const transcript = await updateEntryTranscript(entryId, nextText);
+      setEntryTranscript(transcript.text);
+      setTranscriptVersion(transcript.version);
+      setIsTranscriptEdited(true);
+      setIsEditingTranscript(false);
+      setTranscriptDraft(transcript.text);
+      const versionLabel = transcript.version !== null ? `version ${transcript.version}` : 'a new version';
+      setTranscriptNotice(`Saved ${versionLabel}.`);
+    } catch (error) {
+      setTranscriptError(error instanceof Error ? error.message : 'Failed to save transcript edit.');
+    } finally {
+      setIsSavingTranscript(false);
     }
   }
 
@@ -436,9 +535,14 @@ export function AppPage() {
             </span>
           </div>
           {entryId ? (
-            <p className="text-sm">
-              Entry ID: <span className="font-mono">{entryId}</span>
-            </p>
+            <div className="flex flex-wrap items-center gap-3">
+              <p className="text-sm">
+                Entry ID: <span className="font-mono">{entryId}</span>
+              </p>
+              <Button onClick={() => navigate(`/app/entries/${entryId}`)} size="sm" variant="outline">
+                Open entry detail
+              </Button>
+            </div>
           ) : null}
           {entryStatus ? (
             <p className="text-sm">
@@ -446,6 +550,52 @@ export function AppPage() {
             </p>
           ) : null}
           {errorMessage ? <p className="text-sm text-destructive">{errorMessage}</p> : null}
+        </div>
+        <div className="mt-6 space-y-4 rounded-md border bg-background p-4">
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="text-base font-semibold">Transcript</h2>
+            {transcriptVersion !== null ? (
+              <span className="rounded-full bg-secondary px-2 py-1 text-xs font-medium text-secondary-foreground">
+                Version {transcriptVersion}
+              </span>
+            ) : null}
+            {isTranscriptEdited ? (
+              <span className="rounded-full bg-emerald-100 px-2 py-1 text-xs font-medium text-emerald-800">Edited</span>
+            ) : null}
+          </div>
+
+          {entryTranscript ? (
+            isEditingTranscript ? (
+              <div className="space-y-3">
+                <textarea
+                  className="min-h-44 w-full rounded-md border bg-background p-3 text-sm"
+                  value={transcriptDraft}
+                  onChange={(event) => setTranscriptDraft(event.target.value)}
+                  disabled={isSavingTranscript}
+                />
+                <div className="flex flex-wrap gap-3">
+                  <Button onClick={handleSaveTranscriptEdit} disabled={isSavingTranscript}>
+                    {isSavingTranscript ? 'Saving...' : 'Save new version'}
+                  </Button>
+                  <Button onClick={handleCancelTranscriptEdit} disabled={isSavingTranscript} variant="outline">
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <p className="whitespace-pre-wrap text-sm">{entryTranscript}</p>
+                <Button onClick={handleStartTranscriptEdit} variant="outline">
+                  Edit transcript
+                </Button>
+              </div>
+            )
+          ) : (
+            <p className="text-sm text-muted-foreground">Transcript will appear after processing is complete.</p>
+          )}
+
+          {transcriptNotice ? <p className="text-sm text-emerald-700">{transcriptNotice}</p> : null}
+          {transcriptError ? <p className="text-sm text-destructive">{transcriptError}</p> : null}
         </div>
         <div className="mt-6">
           <Button onClick={handleLogout} disabled={isLoggingOut} variant="outline">
