@@ -1,52 +1,37 @@
-:root {
-  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-  color: #0f172a;
-  background: linear-gradient(160deg, #f8fafc 0%, #e2e8f0 100%);
-}
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
 
-* {
-  box-sizing: border-box;
-}
+@layer base {
+  :root {
+    --background: 210 40% 98%;
+    --foreground: 222.2 84% 4.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 84% 4.9%;
+    --primary: 184 73% 27%;
+    --primary-foreground: 0 0% 98%;
+    --secondary: 203 23% 91%;
+    --secondary-foreground: 222.2 47.4% 11.2%;
+    --muted: 210 40% 96%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+    --accent: 201 94% 86%;
+    --accent-foreground: 222.2 47.4% 11.2%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 214.3 31.8% 91.4%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 184 73% 27%;
+    --radius: 0.6rem;
+  }
 
-body {
-  margin: 0;
-  min-height: 100vh;
-}
+  * {
+    @apply border-border;
+  }
 
-.page {
-  min-height: 100vh;
-  display: grid;
-  place-items: center;
-  padding: 1.5rem;
-}
-
-.card {
-  width: min(560px, 100%);
-  background: #ffffff;
-  border: 1px solid #cbd5e1;
-  border-radius: 12px;
-  padding: 2rem;
-}
-
-h1 {
-  margin: 0 0 0.5rem;
-}
-
-p {
-  margin: 0 0 1.25rem;
-}
-
-.nav {
-  display: flex;
-  gap: 0.75rem;
-}
-
-.nav a {
-  text-decoration: none;
-  color: #1d4ed8;
-  font-weight: 600;
-}
-
-.nav a:hover {
-  color: #1e40af;
+  body {
+    @apply bg-background text-foreground antialiased;
+    margin: 0;
+    min-height: 100vh;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  }
 }

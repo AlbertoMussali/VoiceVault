@@ -86,15 +86,15 @@ Notes:
   - Done when: tree exists; minimal READMEs in each folder explain purpose.
 - [x] [INF] Add dev Docker Compose stack (api, worker, db, redis, web). <!-- group: 100 -->
   - Done when: `docker compose up` boots all services without manual steps.
-- [ ] [BE] Implement FastAPI skeleton (`/health`, `/version`, settings loader). <!-- group: 100 -->
+- [x] [BE] Implement FastAPI skeleton (`/health`, `/version`, settings loader). <!-- group: 100 -->
   - Done when: API container serves health/version endpoints.
 - [x] [FE] Implement Vite + React skeleton with routes (`/login`, `/signup`, `/app`). <!-- group: 100 -->
   - Done when: web container serves UI and routes render.
-- [ ] [INF] Add CI pipeline (lint + tests for FE/BE). <!-- group: 100 -->
+- [x] [INF] Add CI pipeline (lint + tests for FE/BE). <!-- group: 100 -->
   - Done when: CI runs on PR/commit and is green on main branch.
 - [x] [BE] Wire Alembic migrations and DB connectivity end-to-end. <!-- group: 100 -->
   - Done when: `alembic upgrade head` runs in container against compose Postgres.
-- [ ] [FE] Set up Tailwind + shadcn/ui, router, TanStack Query client. <!-- group: 100 -->
+- [x] [FE] Set up Tailwind + shadcn/ui, router, TanStack Query client. <!-- group: 100 -->
   - Done when: basic styled UI components render, no build warnings.
 - [x] [QA] Define project “Definition of Done” and minimal smoke plan in `docs/`. <!-- group: 100 -->
   - Done when: includes required tests per layer and “how to run locally”.
@@ -103,7 +103,7 @@ Notes:
 
 ## Phase 1 — Core backend platform: auth, storage, jobs, base schema
 
-- [ ] [BE] Implement DB schema v1 (users, entries, transcripts, audio_assets, tags, audit_log). <!-- group: 200 -->
+- [x] [BE] Implement DB schema v1 (users, entries, transcripts, audio_assets, tags, audit_log). <!-- group: 200 -->
   - Done when: migrations create tables; app can connect and query.
 - [ ] [BE] Implement auth service: signup/login/refresh/logout with Argon2. <!-- group: 200 -->
   - Done when: accounts can be created and sessions refreshed.
