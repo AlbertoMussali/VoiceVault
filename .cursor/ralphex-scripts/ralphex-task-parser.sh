@@ -107,13 +107,17 @@ get_tasks_by_group() {
 
 get_next_task() {
   local workspace="${1:-.}"
-  _parse_tasks_stream "$workspace" | awk -F'|' '$2=="pending" {print $1 "|" $4 "|" $5; exit}'
+  # NOTE: Under `set -o pipefail`, the producer (`_parse_tasks_stream`) can exit
+  # with SIGPIPE when `awk` exits early. That is expected and should not be
+  # treated as an error for "get first match" helpers.
+  _parse_tasks_stream "$workspace" | awk -F'|' '$2=="pending" {print $1 "|" $4 "|" $5; exit}' || true
 }
 
 get_next_tasks() {
   local workspace="${1:-.}"
   local n="${2:-3}"
-  _parse_tasks_stream "$workspace" | awk -F'|' -v n="$n" '$2=="pending" {print; c++; if (c>=n) exit}'
+  # Same SIGPIPE caveat as get_next_task().
+  _parse_tasks_stream "$workspace" | awk -F'|' -v n="$n" '$2=="pending" {print; c++; if (c>=n) exit}' || true
 }
 
 get_task_by_id() {
