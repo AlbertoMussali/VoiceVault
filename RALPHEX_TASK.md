@@ -134,9 +134,9 @@ Notes:
   - Done when: UI shows uploading/transcribing/ready/error states.
 - [x] [BE] Implement multipart audio upload fully: store blob, set status=transcribing, enqueue job. <!-- group: 300 -->
   - Done when: upload triggers job and persists audio asset record.
-- [ ] [AI] Implement transcription worker job using OpenAI STT and store transcript v1. <!-- group: 300 -->
+- [x] [AI] Implement transcription worker job using OpenAI STT and store transcript v1. <!-- group: 300 -->
   - Done when: transcript saved; entry status flips to ready.
-- [ ] [BE] Define and enforce error contract (transient vs fatal; error_code/message). <!-- group: 300 -->
+- [x] [BE] Define and enforce error contract (transient vs fatal; error_code/message). <!-- group: 300 -->
   - Done when: failures are visible in UI and safe retries are possible.
 - [ ] [FE] Implement processing screen with retry path where safe. <!-- group: 300 -->
   - Done when: user can recover from common failures without data loss.
