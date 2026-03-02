@@ -164,11 +164,11 @@ Notes:
 
 ## Phase 4 — Timeline + search (FTS) + quote chips + highlight navigation
 
-- [ ] [BE] Add Postgres FTS column/index for transcripts (`tsvector` + GIN). <!-- group: 500 -->
+- [x] [BE] Add Postgres FTS column/index for transcripts (`tsvector` + GIN). <!-- group: 500 -->
   - Done when: queries are fast on realistic data volumes.
-- [ ] [BE] Implement `/search` endpoint returning ranked snippets + offsets. <!-- group: 500 -->
+- [x] [BE] Implement `/search` endpoint returning ranked snippets + offsets. <!-- group: 500 -->
   - Done when: response includes `{entry_id, transcript_id, snippet_text, start_char, end_char}`.
-- [ ] [FE] Implement timeline UI with filters (date range, type, context, tags). <!-- group: 500 -->
+- [x] [FE] Implement timeline UI with filters (date range, type, context, tags). <!-- group: 500 -->
   - Done when: browsing feels responsive and predictable.
 - [ ] [FE] Implement search UI: query box + results + jump-to-highlight. <!-- group: 500 -->
   - Done when: click result opens entry and highlights matching span.

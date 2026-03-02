@@ -6,8 +6,10 @@ import { Button } from '@/components/ui/Button';
 import {
   EntryApiError,
   createEntry,
+  fetchEntriesTimeline,
   fetchEntryDetail,
   fetchEntryStatus,
+  type TimelineEntry,
   updateEntryTranscript,
   uploadEntryAudio
 } from '@/lib/entries';
@@ -23,10 +25,22 @@ type EntryIndexingData = {
   tags: string[];
 };
 
+type TimelineEntryRecord = {
+  entryId: string;
+  status: string | null;
+  title: string | null;
+  createdAt: string | null;
+  occurredAt: string | null;
+  type: string | null;
+  context: EntryContext | null;
+  tags: string[];
+};
+
 const READY_STATUSES = new Set(['ready', 'completed', 'done']);
 const ERROR_STATUSES = new Set(['error', 'failed', 'fatal']);
 const MAX_STATUS_POLLS = 40;
 const INDEXING_STORAGE_KEY = 'voicevault.entry-indexing.v1';
+const TIMELINE_STORAGE_KEY = 'voicevault.timeline.v1';
 const ENTRY_TYPE_OPTIONS = ['win', 'blocker', 'idea', 'task', 'learning'];
 
 function parseTags(rawTags: string): string[] {
@@ -93,6 +107,101 @@ function writeStoredIndexing(indexingByEntry: Record<string, EntryIndexingData>)
   window.localStorage.setItem(INDEXING_STORAGE_KEY, JSON.stringify(indexingByEntry));
 }
 
+function readStoredTimeline(): Record<string, TimelineEntryRecord> {
+  if (typeof window === 'undefined') {
+    return {};
+  }
+
+  const raw = window.localStorage.getItem(TIMELINE_STORAGE_KEY);
+  if (!raw) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return {};
+    }
+
+    const result: Record<string, TimelineEntryRecord> = {};
+    for (const [entryId, value] of Object.entries(parsed)) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        continue;
+      }
+
+      const record = value as Record<string, unknown>;
+      const context = record.context === 'work' || record.context === 'life' ? record.context : null;
+      const type = typeof record.type === 'string' ? record.type.trim().toLowerCase() : null;
+      const tags = Array.isArray(record.tags)
+        ? record.tags
+            .filter((tag): tag is string => typeof tag === 'string')
+            .map((tag) => tag.trim().toLowerCase())
+            .filter((tag) => tag.length > 0)
+        : [];
+
+      result[entryId] = {
+        entryId,
+        status: typeof record.status === 'string' ? record.status : null,
+        title: typeof record.title === 'string' ? record.title : null,
+        createdAt: typeof record.createdAt === 'string' ? record.createdAt : null,
+        occurredAt: typeof record.occurredAt === 'string' ? record.occurredAt : null,
+        type,
+        context,
+        tags: Array.from(new Set(tags))
+      };
+    }
+
+    return result;
+  } catch {
+    return {};
+  }
+}
+
+function writeStoredTimeline(timelineByEntry: Record<string, TimelineEntryRecord>) {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  window.localStorage.setItem(TIMELINE_STORAGE_KEY, JSON.stringify(timelineByEntry));
+}
+
+function normalizeIsoDate(raw: string | null): string | null {
+  if (!raw) {
+    return null;
+  }
+
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+
+  return date.toISOString();
+}
+
+function formatTimelineDate(raw: string | null): string {
+  const iso = normalizeIsoDate(raw);
+  if (!iso) {
+    return 'Unknown date';
+  }
+
+  return new Date(iso).toLocaleString();
+}
+
+function mapTimelineEntry(entry: TimelineEntry): TimelineEntryRecord {
+  const context = entry.context === 'work' || entry.context === 'life' ? entry.context : null;
+  const type = entry.entryType ? entry.entryType.trim().toLowerCase() : null;
+  return {
+    entryId: entry.entryId,
+    status: entry.status,
+    title: entry.title,
+    createdAt: normalizeIsoDate(entry.createdAt),
+    occurredAt: normalizeIsoDate(entry.occurredAt),
+    type,
+    context,
+    tags: Array.from(new Set(entry.tags.map((tag) => tag.trim().toLowerCase()).filter((tag) => tag.length > 0)))
+  };
+}
+
 function normalizeStatus(status: string | null): string {
   return (status ?? '').trim().toLowerCase();
 }
@@ -143,6 +252,14 @@ export function AppPage() {
   const [transcriptError, setTranscriptError] = useState<string | null>(null);
   const [transcriptNotice, setTranscriptNotice] = useState<string | null>(null);
   const [indexingByEntry, setIndexingByEntry] = useState<Record<string, EntryIndexingData>>(() => readStoredIndexing());
+  const [timelineByEntry, setTimelineByEntry] = useState<Record<string, TimelineEntryRecord>>(() => readStoredTimeline());
+  const [isTimelineLoading, setIsTimelineLoading] = useState(true);
+  const [timelineError, setTimelineError] = useState<string | null>(null);
+  const [timelineDateFrom, setTimelineDateFrom] = useState('');
+  const [timelineDateTo, setTimelineDateTo] = useState('');
+  const [timelineTypeFilter, setTimelineTypeFilter] = useState<'all' | string>('all');
+  const [timelineContextFilter, setTimelineContextFilter] = useState<'all' | EntryContext>('all');
+  const [timelineTagFilterInput, setTimelineTagFilterInput] = useState('');
   const [isIndexingModalOpen, setIsIndexingModalOpen] = useState(false);
   const [indexType, setIndexType] = useState('');
   const [indexContext, setIndexContext] = useState<EntryContext | null>(null);
@@ -174,11 +291,76 @@ export function AppPage() {
     []
   );
 
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadTimeline = async () => {
+      setIsTimelineLoading(true);
+      setTimelineError(null);
+      try {
+        const entries = await fetchEntriesTimeline();
+        if (cancelled) {
+          return;
+        }
+        if (entries.length > 0) {
+          setTimelineByEntry((previous) => {
+            const next = { ...previous };
+            for (const entry of entries) {
+              const mapped = mapTimelineEntry(entry);
+              const existing = next[mapped.entryId];
+              next[mapped.entryId] = {
+                ...mapped,
+                type: existing?.type ?? mapped.type,
+                context: existing?.context ?? mapped.context,
+                tags: existing?.tags && existing.tags.length > 0 ? existing.tags : mapped.tags
+              };
+            }
+            writeStoredTimeline(next);
+            return next;
+          });
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setTimelineError(error instanceof Error ? error.message : 'Failed to load timeline entries.');
+        }
+      } finally {
+        if (!cancelled) {
+          setIsTimelineLoading(false);
+        }
+      }
+    };
+
+    void loadTimeline();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   function stopPolling() {
     if (pollTimerRef.current !== null) {
       window.clearInterval(pollTimerRef.current);
       pollTimerRef.current = null;
     }
+  }
+
+  function upsertTimelineEntry(entryId: string, patch: Partial<TimelineEntryRecord>) {
+    setTimelineByEntry((previous) => {
+      const existing = previous[entryId];
+      const next: TimelineEntryRecord = {
+        entryId,
+        status: patch.status ?? existing?.status ?? null,
+        title: patch.title ?? existing?.title ?? null,
+        createdAt: patch.createdAt ?? existing?.createdAt ?? new Date().toISOString(),
+        occurredAt: patch.occurredAt ?? existing?.occurredAt ?? null,
+        type: patch.type ?? existing?.type ?? null,
+        context: patch.context ?? existing?.context ?? null,
+        tags: patch.tags ?? existing?.tags ?? []
+      };
+      const updated = { ...previous, [entryId]: next };
+      writeStoredTimeline(updated);
+      return updated;
+    });
   }
 
   function resetTranscriptState() {
@@ -195,6 +377,7 @@ export function AppPage() {
     const detail = await fetchEntryDetail(targetEntryId);
     if (detail.status) {
       setEntryStatus(detail.status);
+      upsertTimelineEntry(targetEntryId, { status: detail.status });
     }
 
     if (!detail.transcript) {
@@ -354,6 +537,7 @@ export function AppPage() {
         const result = await fetchEntryStatus(nextEntryId);
         const normalized = normalizeStatus(result.status);
         setEntryStatus(result.status ?? 'processing');
+        upsertTimelineEntry(nextEntryId, { status: result.status });
 
         if (READY_STATUSES.has(normalized)) {
           setPipelineState('ready');
@@ -461,6 +645,7 @@ export function AppPage() {
         currentEntryId = created.entryId;
         setEntryId(created.entryId);
         setEntryStatus(created.status);
+        upsertTimelineEntry(created.entryId, { status: created.status, createdAt: new Date().toISOString() });
       }
       if (!currentEntryId) {
         throw new Error('Entry creation did not return an id.');
@@ -561,10 +746,11 @@ export function AppPage() {
       return;
     }
 
+    const parsedTags = parseTags(indexTagsInput);
     const next: EntryIndexingData = {
       type: indexType,
       context: indexContext,
-      tags: parseTags(indexTagsInput)
+      tags: parsedTags
     };
 
     setIndexingByEntry((previous) => {
@@ -574,6 +760,11 @@ export function AppPage() {
       };
       writeStoredIndexing(updated);
       return updated;
+    });
+    upsertTimelineEntry(entryId, {
+      type: indexType,
+      context: indexContext,
+      tags: parsedTags
     });
     setTranscriptNotice('Saved quick indexing.');
     setIsIndexingModalOpen(false);
@@ -589,6 +780,44 @@ export function AppPage() {
         : retryAction === 'restart_pipeline'
           ? 'Restart pipeline'
           : null;
+  const timelineEntries = Object.values(timelineByEntry).sort((left, right) => {
+    const leftRaw = left.occurredAt ?? left.createdAt;
+    const rightRaw = right.occurredAt ?? right.createdAt;
+    const leftTs = leftRaw ? Date.parse(leftRaw) : 0;
+    const rightTs = rightRaw ? Date.parse(rightRaw) : 0;
+    return rightTs - leftTs;
+  });
+  const typeFilterOptions = Array.from(
+    new Set(timelineEntries.map((entry) => entry.type).filter((value): value is string => Boolean(value)))
+  ).sort();
+  const allKnownTags = Array.from(new Set(timelineEntries.flatMap((entry) => entry.tags))).sort();
+  const tagFilters = timelineTagFilterInput
+    .split(',')
+    .map((tag) => tag.trim().toLowerCase())
+    .filter((tag) => tag.length > 0);
+  const filteredTimelineEntries = timelineEntries.filter((entry) => {
+    const entryDateRaw = entry.occurredAt ?? entry.createdAt;
+    const entryDate = entryDateRaw ? new Date(entryDateRaw) : null;
+    const entryDay = entryDate && !Number.isNaN(entryDate.getTime()) ? entryDate.toISOString().slice(0, 10) : null;
+
+    if (timelineDateFrom && (!entryDay || entryDay < timelineDateFrom)) {
+      return false;
+    }
+    if (timelineDateTo && (!entryDay || entryDay > timelineDateTo)) {
+      return false;
+    }
+    if (timelineTypeFilter !== 'all' && entry.type !== timelineTypeFilter) {
+      return false;
+    }
+    if (timelineContextFilter !== 'all' && entry.context !== timelineContextFilter) {
+      return false;
+    }
+    if (tagFilters.length > 0 && !tagFilters.every((tag) => entry.tags.includes(tag))) {
+      return false;
+    }
+
+    return true;
+  });
 
   return (
     <main className="min-h-screen bg-gradient-to-br from-sky-50 via-cyan-50 to-emerald-100 p-6">
@@ -759,6 +988,122 @@ export function AppPage() {
             </div>
           ) : (
             <p className="text-sm text-muted-foreground">No indexing saved for this entry yet.</p>
+          )}
+        </div>
+        <div className="mt-6 space-y-4 rounded-md border bg-background p-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h2 className="text-base font-semibold">Timeline</h2>
+            <span className="text-xs text-muted-foreground">
+              Showing {filteredTimelineEntries.length} of {timelineEntries.length}
+            </span>
+          </div>
+          <p className="text-sm text-muted-foreground">Filter by date range, type, context, and tags.</p>
+          <div className="grid gap-3 md:grid-cols-2">
+            <label className="space-y-1 text-sm">
+              <span className="font-medium">Date from</span>
+              <input
+                type="date"
+                value={timelineDateFrom}
+                onChange={(event) => setTimelineDateFrom(event.target.value)}
+                className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+              />
+            </label>
+            <label className="space-y-1 text-sm">
+              <span className="font-medium">Date to</span>
+              <input
+                type="date"
+                value={timelineDateTo}
+                onChange={(event) => setTimelineDateTo(event.target.value)}
+                className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+              />
+            </label>
+            <label className="space-y-1 text-sm">
+              <span className="font-medium">Type</span>
+              <select
+                value={timelineTypeFilter}
+                onChange={(event) => setTimelineTypeFilter(event.target.value)}
+                className="w-full rounded-md border bg-background px-3 py-2 text-sm capitalize"
+              >
+                <option value="all">All types</option>
+                {typeFilterOptions.map((option) => (
+                  <option key={option} value={option} className="capitalize">
+                    {option}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="space-y-1 text-sm">
+              <span className="font-medium">Context</span>
+              <select
+                value={timelineContextFilter}
+                onChange={(event) => setTimelineContextFilter(event.target.value as 'all' | EntryContext)}
+                className="w-full rounded-md border bg-background px-3 py-2 text-sm capitalize"
+              >
+                <option value="all">All contexts</option>
+                <option value="work">Work</option>
+                <option value="life">Life</option>
+              </select>
+            </label>
+          </div>
+          <label className="space-y-1 text-sm">
+            <span className="font-medium">Tags (comma-separated)</span>
+            <input
+              type="text"
+              value={timelineTagFilterInput}
+              onChange={(event) => setTimelineTagFilterInput(event.target.value)}
+              placeholder="e.g. project-x, retro"
+              className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+            />
+            {allKnownTags.length > 0 ? (
+              <span className="block text-xs text-muted-foreground">Known tags: {allKnownTags.map((tag) => `#${tag}`).join(', ')}</span>
+            ) : null}
+          </label>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                setTimelineDateFrom('');
+                setTimelineDateTo('');
+                setTimelineTypeFilter('all');
+                setTimelineContextFilter('all');
+                setTimelineTagFilterInput('');
+              }}
+            >
+              Clear filters
+            </Button>
+          </div>
+          {isTimelineLoading ? <p className="text-sm text-muted-foreground">Loading timeline...</p> : null}
+          {timelineError ? <p className="text-sm text-destructive">{timelineError}</p> : null}
+          {filteredTimelineEntries.length > 0 ? (
+            <div className="space-y-3">
+              {filteredTimelineEntries.map((entry) => (
+                <article key={entry.entryId} className="rounded-md border p-3">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <h3 className="text-sm font-semibold">{entry.title ?? 'Untitled entry'}</h3>
+                      <p className="text-xs text-muted-foreground">{formatTimelineDate(entry.occurredAt ?? entry.createdAt)}</p>
+                    </div>
+                    <Button size="sm" variant="outline" onClick={() => navigate(`/app/entries/${entry.entryId}`)}>
+                      Open
+                    </Button>
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-2 text-xs">
+                    <span className="rounded-full bg-secondary px-2 py-1">Status: {entry.status ?? 'unknown'}</span>
+                    {entry.type ? <span className="rounded-full bg-emerald-100 px-2 py-1 text-emerald-900 capitalize">{entry.type}</span> : null}
+                    {entry.context ? <span className="rounded-full bg-cyan-100 px-2 py-1 text-cyan-900 capitalize">{entry.context}</span> : null}
+                    {entry.tags.map((tag) => (
+                      <span key={`${entry.entryId}-${tag}`} className="rounded-full bg-slate-100 px-2 py-1 text-slate-700">
+                        #{tag}
+                      </span>
+                    ))}
+                  </div>
+                  <p className="mt-2 truncate font-mono text-xs text-muted-foreground">{entry.entryId}</p>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <p className="text-sm text-muted-foreground">No entries match the selected filters yet.</p>
           )}
         </div>
         <div className="mt-6">

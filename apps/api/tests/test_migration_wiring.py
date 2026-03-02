@@ -28,6 +28,7 @@ class MigrationWiringTests(unittest.TestCase):
         self.assertIn("20260302_0002_create_schema_v1.py", migration_files)
         self.assertIn("20260302_0003_create_refresh_sessions.py", migration_files)
         self.assertIn("20260302_0004_create_entry_tags.py", migration_files)
+        self.assertIn("20260302_0005_add_transcript_fts_index.py", migration_files)
 
     def test_schema_v1_migration_creates_required_tables(self) -> None:
         migration_py = (ROOT / "alembic" / "versions" / "20260302_0002_create_schema_v1.py").read_text(
@@ -43,6 +44,14 @@ class MigrationWiringTests(unittest.TestCase):
         )
         self.assertIn("op.create_table(", migration_py)
         self.assertIn('"entry_tags"', migration_py)
+
+    def test_transcript_fts_migration_adds_tsvector_and_gin_index(self) -> None:
+        migration_py = (ROOT / "alembic" / "versions" / "20260302_0005_add_transcript_fts_index.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("TSVECTOR", migration_py)
+        self.assertIn("postgresql_using=\"gin\"", migration_py)
+        self.assertIn("CREATE TRIGGER transcripts_search_vector_trigger", migration_py)
 
 
 if __name__ == "__main__":

@@ -27,6 +27,17 @@ export type EntryDetail = EntryStatusResponse & {
 
 export type EntryDetailResponse = EntryDetail;
 
+export type TimelineEntry = {
+  entryId: string;
+  status: string | null;
+  title: string | null;
+  createdAt: string | null;
+  occurredAt: string | null;
+  entryType: string | null;
+  context: string | null;
+  tags: string[];
+};
+
 export class EntryApiError extends ApiError {
   readonly errorCode?: string;
   readonly errorType?: string;
@@ -213,6 +224,54 @@ function pickAudioUrl(payload: unknown): string | null {
   return pickString(audioRecord.url, audioRecord.audio_url, audioRecord.audioUrl);
 }
 
+function parseTagsFromEntryPayload(payload: unknown): string[] {
+  const root = asRecord(payload);
+  if (!root) {
+    return [];
+  }
+
+  const collection = root.tags;
+  if (!Array.isArray(collection)) {
+    return [];
+  }
+
+  const parsed = collection
+    .map((value) => {
+      if (typeof value === 'string') {
+        return value.trim().toLowerCase();
+      }
+      const record = asRecord(value);
+      const name = pickString(record?.name, record?.normalized_name, record?.normalizedName);
+      return name ? name.trim().toLowerCase() : '';
+    })
+    .filter((value) => value.length > 0);
+
+  return Array.from(new Set(parsed));
+}
+
+function parseTimelineEntry(payload: unknown): TimelineEntry | null {
+  const data = asRecord(payload);
+  if (!data) {
+    return null;
+  }
+
+  const entryId = pickEntryId(payload);
+  if (!entryId) {
+    return null;
+  }
+
+  return {
+    entryId,
+    status: pickEntryStatus(payload),
+    title: pickString(data.title, data.entry_title, data.entryTitle),
+    createdAt: pickString(data.created_at, data.createdAt),
+    occurredAt: pickString(data.occurred_at, data.occurredAt),
+    entryType: pickString(data.entry_type, data.entryType, data.type),
+    context: pickString(data.context),
+    tags: parseTagsFromEntryPayload(payload)
+  };
+}
+
 function parseTranscriptPayload(payload: unknown): TranscriptResponse | null {
   if (!payload || typeof payload !== 'object') {
     return null;
@@ -332,4 +391,28 @@ export async function updateEntryTranscript(entryId: string, transcriptText: str
   }
 
   return transcript;
+}
+
+export async function fetchEntriesTimeline(): Promise<TimelineEntry[]> {
+  const payload = await authorizedFetch('/api/v1/entries', { method: 'GET' });
+  const root = asRecord(payload);
+  if (!root) {
+    return [];
+  }
+
+  const entries = root.entries;
+  if (!Array.isArray(entries)) {
+    return [];
+  }
+
+  const parsed = entries
+    .map((value) => parseTimelineEntry(value))
+    .filter((value): value is TimelineEntry => value !== null);
+
+  const deduped = new Map<string, TimelineEntry>();
+  for (const entry of parsed) {
+    deduped.set(entry.entryId, entry);
+  }
+
+  return Array.from(deduped.values());
 }
