@@ -5,6 +5,7 @@ from fastapi.requests import Request
 from starlette.responses import Response
 
 from app.auth import authorize_entries_request
+from app.db import initialize_schema
 from app.routers.auth import router as auth_router
 from app.routes.entries import router as entries_router
 from app.settings import get_settings
@@ -13,6 +14,13 @@ from app.settings import get_settings
 def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(title="VoiceVault API", version=settings.api_version)
+
+    @app.on_event("startup")
+    def startup() -> None:
+        # The MVP uses Postgres + Alembic for real environments. For unit tests, we
+        # run against SQLite and create tables from SQLAlchemy metadata.
+        if settings.database_url.startswith("sqlite"):
+            initialize_schema()
 
     @app.middleware("http")
     async def entry_authorization_middleware(request: Request, call_next) -> Response:
