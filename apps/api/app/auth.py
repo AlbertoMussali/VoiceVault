@@ -6,9 +6,11 @@ import uuid
 
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
+from fastapi import Request
 import jwt
 from jwt import InvalidTokenError
 from sqlalchemy.orm import Session
+from starlette.responses import JSONResponse, Response
 
 from app.models import RefreshSession, User
 from app.settings import Settings
@@ -82,3 +84,50 @@ def create_refresh_session(db: Session, user: User, settings: Settings) -> tuple
     )
     db.add(refresh_session)
     return refresh_token, refresh_session
+
+
+def _unauthorized_response() -> Response:
+    return JSONResponse(
+        status_code=401,
+        content={"detail": "Unauthorized"},
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+def _extract_bearer_token(request: Request) -> str | None:
+    authorization = request.headers.get("Authorization", "")
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        return None
+    return token
+
+
+def authorize_static_bearer_token(request: Request, expected_token: str) -> Response | None:
+    token = _extract_bearer_token(request)
+    if token is None or token != expected_token:
+        return _unauthorized_response()
+    return None
+
+
+def authorize_entries_request(request: Request, settings: Settings) -> Response | None:
+    """
+    Authorize requests for early `/api/v1/entries` endpoints.
+
+    During MVP bootstrapping, allow either:
+    - a static bearer token (`ENTRY_AUTH_TOKEN`) for lightweight local/testing, OR
+    - a signed JWT access token issued by the auth service.
+    """
+    token = _extract_bearer_token(request)
+    if token is None:
+        return _unauthorized_response()
+
+    if token == settings.entry_auth_token:
+        return None
+
+    try:
+        decode_token(token, settings, expected_type="access")
+    except InvalidTokenError:
+        return _unauthorized_response()
+
+    return None
+
