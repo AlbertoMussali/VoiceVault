@@ -153,13 +153,13 @@ Notes:
   - Done when: entry renders reliably and is navigable from timeline/search.
 - [x] [FE] Implement “Edit transcript” mode that creates a new transcript version. <!-- group: 400 -->
   - Done when: edits persist; version increments; UI indicates edited status.
-- [ ] [FE] Implement 5-second indexing modal post-transcription (type, context, tags). <!-- group: 400 -->
+- [x] [FE] Implement 5-second indexing modal post-transcription (type, context, tags). <!-- group: 400 -->
   - Done when: user can classify Win/Blocker/etc + Work/Life + tags.
-- [ ] [BE] Implement tags CRUD + autocomplete (normalized). <!-- group: 400 -->
+- [x] [BE] Implement tags CRUD + autocomplete (normalized). <!-- group: 400 -->
   - Done when: tag suggestions work; entry-tag links persist.
-- [ ] [BE] Implement baseline title behavior (deterministic or optional job). <!-- group: 400 -->
+- [x] [BE] Implement baseline title behavior (deterministic or optional job). <!-- group: 400 -->
   - Done when: entries show a stable title without needing generation.
-- [ ] [QA] Add tests for transcript revision + tag linking behavior. <!-- group: 400 -->
+- [x] [QA] Add tests for transcript revision + tag linking behavior. <!-- group: 400 -->
   - Done when: edits don’t corrupt offsets; tag relations correct.
 
 ## Phase 4 — Timeline + search (FTS) + quote chips + highlight navigation

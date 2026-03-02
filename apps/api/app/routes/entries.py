@@ -6,18 +6,17 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
-from jwt import InvalidTokenError
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.datastructures import UploadFile
 
-from app.auth import decode_token
 from app.db import get_db
+from app.entry_titles import fallback_entry_title
 from app.jobs import enqueue_registered_job
 from app.errors import ApiContractError, ErrorType
-from app.models import AuditLog, AudioAsset, Entry, Transcript, User
-from app.settings import get_settings
+from app.models import AuditLog, AudioAsset, Entry, EntryTag, Tag, Transcript
+from app.routes.common import resolve_request_user_id
 from app.storage import get_storage_backend
 
 router = APIRouter(prefix="/api/v1/entries", tags=["entries"])
@@ -29,63 +28,12 @@ class TranscriptPatchRequest(BaseModel):
     source: str = Field(default="user_edit", min_length=1, max_length=32)
 
 
-def _extract_bearer_token(request: Request) -> str:
-    authorization = request.headers.get("Authorization", "")
-    scheme, _, token = authorization.partition(" ")
-    if scheme.lower() != "bearer" or not token:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Unauthorized",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    return token
+class EntryTagsUpdateRequest(BaseModel):
+    tag_ids: list[uuid.UUID] = Field(default_factory=list)
 
 
-def _resolve_request_user_id(request: Request, db: Session) -> uuid.UUID:
-    settings = get_settings()
-    token = _extract_bearer_token(request)
-
-    if token == settings.entry_auth_token:
-        requested_user_id = request.headers.get("x-user-id")
-        if requested_user_id is not None:
-            try:
-                user_id = uuid.UUID(requested_user_id)
-            except ValueError as exc:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="x-user-id must be a valid UUID",
-                ) from exc
-
-            if db.get(User, user_id) is None:
-                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-            return user_id
-
-        first_user_id = db.query(User.id).order_by(User.created_at.asc()).limit(1).scalar()
-        if first_user_id is None:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No users available for static entry token; provide x-user-id",
-            )
-        return first_user_id
-
-    try:
-        payload = decode_token(token, settings, expected_type="access")
-        user_id = uuid.UUID(str(payload["sub"]))
-    except (InvalidTokenError, KeyError, ValueError) as exc:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Unauthorized",
-            headers={"WWW-Authenticate": "Bearer"},
-        ) from exc
-
-    if db.get(User, user_id) is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Unauthorized",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
-    return user_id
+def _serialize_tag(tag: Tag) -> dict[str, str]:
+    return {"id": str(tag.id), "name": tag.name, "normalized_name": tag.normalized_name}
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -93,12 +41,14 @@ def create_entry(
     request: Request,
     db: Session = Depends(get_db),
 ) -> dict[str, str]:
-    user_id = _resolve_request_user_id(request, db)
+    user_id = resolve_request_user_id(request, db)
     entry = Entry(user_id=user_id, status="draft")
     db.add(entry)
+    db.flush()
+    entry.title = fallback_entry_title(entry.id)
     db.commit()
     db.refresh(entry)
-    return {"entry_id": str(entry.id), "status": entry.status}
+    return {"entry_id": str(entry.id), "status": entry.status, "title": entry.title}
 
 
 @router.get("")
@@ -299,3 +249,67 @@ async def upload_entry_audio(
         "size_bytes": audio_asset.size_bytes,
         "mime_type": audio_asset.mime_type,
     }
+
+
+@router.get("/{entry_id}/tags")
+def list_entry_tags(
+    entry_id: uuid.UUID,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict[str, str | list[dict[str, str]]]:
+    user_id = resolve_request_user_id(request, db)
+    entry = db.get(Entry, entry_id)
+    if entry is None or entry.user_id != user_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
+
+    tags = (
+        db.execute(
+            select(Tag)
+            .join(EntryTag, EntryTag.tag_id == Tag.id)
+            .where(EntryTag.entry_id == entry_id, Tag.user_id == user_id)
+            .order_by(Tag.name.asc())
+        )
+        .scalars()
+        .all()
+    )
+    return {"entry_id": str(entry_id), "tags": [_serialize_tag(tag) for tag in tags]}
+
+
+@router.put("/{entry_id}/tags")
+def update_entry_tags(
+    entry_id: uuid.UUID,
+    payload: EntryTagsUpdateRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict[str, str | list[dict[str, str]]]:
+    user_id = resolve_request_user_id(request, db)
+    entry = db.get(Entry, entry_id)
+    if entry is None or entry.user_id != user_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
+
+    unique_tag_ids = list(dict.fromkeys(payload.tag_ids))
+    if unique_tag_ids:
+        tags = (
+            db.execute(select(Tag).where(Tag.user_id == user_id, Tag.id.in_(unique_tag_ids)))
+            .scalars()
+            .all()
+        )
+        if len(tags) != len(unique_tag_ids):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="One or more tags do not exist")
+
+    db.query(EntryTag).filter(EntryTag.entry_id == entry_id).delete(synchronize_session=False)
+    for tag_id in unique_tag_ids:
+        db.add(EntryTag(entry_id=entry_id, tag_id=tag_id))
+    db.commit()
+
+    linked_tags = (
+        db.execute(
+            select(Tag)
+            .join(EntryTag, EntryTag.tag_id == Tag.id)
+            .where(EntryTag.entry_id == entry_id, Tag.user_id == user_id)
+            .order_by(Tag.name.asc())
+        )
+        .scalars()
+        .all()
+    )
+    return {"entry_id": str(entry_id), "tags": [_serialize_tag(tag) for tag in linked_tags]}

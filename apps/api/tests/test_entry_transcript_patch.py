@@ -150,6 +150,72 @@ class EntryTranscriptPatchTests(unittest.TestCase):
             },
         )
 
+    def test_patch_entry_transcript_keeps_previous_versions_stable_for_offset_reads(self) -> None:
+        session = get_sessionmaker()()
+        try:
+            user = User(email="editor3@example.com", password_hash="not-a-real-hash")
+            session.add(user)
+            session.flush()
+
+            entry = Entry(user_id=user.id, status="ready")
+            session.add(entry)
+            session.flush()
+
+            original_text = "alpha beta gamma"
+            session.add(
+                Transcript(
+                    entry_id=entry.id,
+                    version=1,
+                    is_current=True,
+                    transcript_text=original_text,
+                    language_code="en",
+                    source="stt",
+                )
+            )
+            session.commit()
+            entry_id = entry.id
+        finally:
+            session.close()
+
+        first_edit = self.client.patch(
+            f"/api/v1/entries/{entry_id}/transcript",
+            json={"transcript_text": "first edited transcript"},
+            headers={"Authorization": "Bearer entry-secret-test"},
+        )
+        self.assertEqual(first_edit.status_code, 200)
+
+        second_edit = self.client.patch(
+            f"/api/v1/entries/{entry_id}/transcript",
+            json={"transcript_text": "second edited transcript"},
+            headers={"Authorization": "Bearer entry-secret-test"},
+        )
+        self.assertEqual(second_edit.status_code, 200)
+
+        session = get_sessionmaker()()
+        try:
+            transcripts = (
+                session.query(Transcript)
+                .filter(Transcript.entry_id == entry_id)
+                .order_by(Transcript.version.asc())
+                .all()
+            )
+            self.assertEqual([transcript.version for transcript in transcripts], [1, 2, 3])
+            self.assertEqual(sum(1 for transcript in transcripts if transcript.is_current), 1)
+
+            v1 = transcripts[0]
+            v2 = transcripts[1]
+            v3 = transcripts[2]
+
+            self.assertEqual(v1.transcript_text, original_text)
+            self.assertEqual(v1.transcript_text[6:10], "beta")
+            self.assertEqual(v2.transcript_text, "first edited transcript")
+            self.assertEqual(v3.transcript_text, "second edited transcript")
+            self.assertFalse(v1.is_current)
+            self.assertFalse(v2.is_current)
+            self.assertTrue(v3.is_current)
+        finally:
+            session.close()
+
 
 if __name__ == "__main__":
     unittest.main()

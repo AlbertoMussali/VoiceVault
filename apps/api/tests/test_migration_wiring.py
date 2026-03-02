@@ -27,6 +27,7 @@ class MigrationWiringTests(unittest.TestCase):
         migration_files = [path.name for path in versions.glob("*.py")]
         self.assertIn("20260302_0002_create_schema_v1.py", migration_files)
         self.assertIn("20260302_0003_create_refresh_sessions.py", migration_files)
+        self.assertIn("20260302_0004_create_entry_tags.py", migration_files)
 
     def test_schema_v1_migration_creates_required_tables(self) -> None:
         migration_py = (ROOT / "alembic" / "versions" / "20260302_0002_create_schema_v1.py").read_text(
@@ -36,7 +37,13 @@ class MigrationWiringTests(unittest.TestCase):
         for table_name in ["users", "entries", "transcripts", "audio_assets", "tags", "audit_log"]:
             self.assertIn(f'"{table_name}"', migration_py)
 
+    def test_entry_tags_migration_creates_required_table(self) -> None:
+        migration_py = (ROOT / "alembic" / "versions" / "20260302_0004_create_entry_tags.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("op.create_table(", migration_py)
+        self.assertIn('"entry_tags"', migration_py)
+
 
 if __name__ == "__main__":
     unittest.main()
-

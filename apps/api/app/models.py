@@ -82,6 +82,7 @@ class Entry(Base):
     user: Mapped["User"] = relationship(back_populates="entries")
     transcript_versions: Mapped[list["Transcript"]] = relationship(back_populates="entry", cascade="all, delete-orphan")
     audio_assets: Mapped[list["AudioAsset"]] = relationship(back_populates="entry", cascade="all, delete-orphan")
+    entry_tags: Mapped[list["EntryTag"]] = relationship(back_populates="entry", cascade="all, delete-orphan")
 
 
 class Transcript(Base):
@@ -142,6 +143,30 @@ class Tag(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     user: Mapped["User"] = relationship(back_populates="tags")
+    entry_tags: Mapped[list["EntryTag"]] = relationship(back_populates="tag", cascade="all, delete-orphan")
+
+
+class EntryTag(Base):
+    __tablename__ = "entry_tags"
+    __table_args__ = (UniqueConstraint("entry_id", "tag_id", name="uq_entry_tags_entry_tag"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    entry_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("entries.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    tag_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("tags.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    entry: Mapped["Entry"] = relationship(back_populates="entry_tags")
+    tag: Mapped["Tag"] = relationship(back_populates="entry_tags")
 
 
 class AuditLog(Base):
@@ -163,4 +188,3 @@ class AuditLog(Base):
     event_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     metadata_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), index=True)
-

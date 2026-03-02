@@ -15,10 +15,83 @@ import {
 type PipelineState = 'idle' | 'creating' | 'uploading' | 'transcribing' | 'ready' | 'error';
 type RetryAction = 'restart_pipeline' | 'retry_upload' | 'resume_polling' | null;
 type PipelineStep = 'creating' | 'uploading' | 'polling';
+type EntryContext = 'work' | 'life';
+
+type EntryIndexingData = {
+  type: string;
+  context: EntryContext;
+  tags: string[];
+};
 
 const READY_STATUSES = new Set(['ready', 'completed', 'done']);
 const ERROR_STATUSES = new Set(['error', 'failed', 'fatal']);
 const MAX_STATUS_POLLS = 40;
+const INDEXING_STORAGE_KEY = 'voicevault.entry-indexing.v1';
+const ENTRY_TYPE_OPTIONS = ['win', 'blocker', 'idea', 'task', 'learning'];
+
+function parseTags(rawTags: string): string[] {
+  const next = rawTags
+    .split(',')
+    .map((tag) => tag.trim())
+    .filter((tag) => tag.length > 0)
+    .slice(0, 10);
+
+  return Array.from(new Set(next));
+}
+
+function readStoredIndexing(): Record<string, EntryIndexingData> {
+  if (typeof window === 'undefined') {
+    return {};
+  }
+
+  const raw = window.localStorage.getItem(INDEXING_STORAGE_KEY);
+  if (!raw) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return {};
+    }
+
+    const result: Record<string, EntryIndexingData> = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        continue;
+      }
+
+      const indexing = value as Record<string, unknown>;
+      const type = typeof indexing.type === 'string' ? indexing.type.trim().toLowerCase() : '';
+      const context = indexing.context === 'work' || indexing.context === 'life' ? indexing.context : null;
+      const tags = Array.isArray(indexing.tags)
+        ? indexing.tags.filter((tag): tag is string => typeof tag === 'string').map((tag) => tag.trim()).filter((tag) => tag.length > 0)
+        : [];
+
+      if (!type || !context) {
+        continue;
+      }
+
+      result[key] = {
+        type,
+        context,
+        tags: Array.from(new Set(tags)).slice(0, 10)
+      };
+    }
+
+    return result;
+  } catch {
+    return {};
+  }
+}
+
+function writeStoredIndexing(indexingByEntry: Record<string, EntryIndexingData>) {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  window.localStorage.setItem(INDEXING_STORAGE_KEY, JSON.stringify(indexingByEntry));
+}
 
 function normalizeStatus(status: string | null): string {
   return (status ?? '').trim().toLowerCase();
@@ -69,6 +142,11 @@ export function AppPage() {
   const [isSavingTranscript, setIsSavingTranscript] = useState(false);
   const [transcriptError, setTranscriptError] = useState<string | null>(null);
   const [transcriptNotice, setTranscriptNotice] = useState<string | null>(null);
+  const [indexingByEntry, setIndexingByEntry] = useState<Record<string, EntryIndexingData>>(() => readStoredIndexing());
+  const [isIndexingModalOpen, setIsIndexingModalOpen] = useState(false);
+  const [indexType, setIndexType] = useState('');
+  const [indexContext, setIndexContext] = useState<EntryContext | null>(null);
+  const [indexTagsInput, setIndexTagsInput] = useState('');
   const pollTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -131,6 +209,25 @@ export function AppPage() {
     if (!isEditingTranscript) {
       setTranscriptDraft(detail.transcript.text);
     }
+  }
+
+  function resetIndexingDraft() {
+    setIndexType('');
+    setIndexContext(null);
+    setIndexTagsInput('');
+  }
+
+  function openIndexingModal(targetEntryId: string) {
+    const existing = indexingByEntry[targetEntryId];
+    if (existing) {
+      setIndexType(existing.type);
+      setIndexContext(existing.context);
+      setIndexTagsInput(existing.tags.join(', '));
+    } else {
+      resetIndexingDraft();
+    }
+
+    setIsIndexingModalOpen(true);
   }
 
   async function handleLogout() {
@@ -263,6 +360,9 @@ export function AppPage() {
           setRetryAction(null);
           stopPolling();
           await refreshEntryDetail(nextEntryId);
+          if (!indexingByEntry[nextEntryId]) {
+            openIndexingModal(nextEntryId);
+          }
           return false;
         }
 
@@ -451,7 +551,36 @@ export function AppPage() {
     }
   }
 
+  function handleSkipIndexing() {
+    setIsIndexingModalOpen(false);
+    resetIndexingDraft();
+  }
+
+  function handleSaveIndexing() {
+    if (!entryId || !indexType || !indexContext) {
+      return;
+    }
+
+    const next: EntryIndexingData = {
+      type: indexType,
+      context: indexContext,
+      tags: parseTags(indexTagsInput)
+    };
+
+    setIndexingByEntry((previous) => {
+      const updated = {
+        ...previous,
+        [entryId]: next
+      };
+      writeStoredIndexing(updated);
+      return updated;
+    });
+    setTranscriptNotice('Saved quick indexing.');
+    setIsIndexingModalOpen(false);
+  }
+
   const isBusy = pipelineState === 'creating' || pipelineState === 'uploading' || pipelineState === 'transcribing';
+  const currentIndexing = entryId ? indexingByEntry[entryId] : null;
   const retryLabel =
     retryAction === 'retry_upload'
       ? 'Retry upload'
@@ -597,12 +726,131 @@ export function AppPage() {
           {transcriptNotice ? <p className="text-sm text-emerald-700">{transcriptNotice}</p> : null}
           {transcriptError ? <p className="text-sm text-destructive">{transcriptError}</p> : null}
         </div>
+        <div className="mt-6 space-y-4 rounded-md border bg-background p-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h2 className="text-base font-semibold">Quick Indexing</h2>
+            <Button
+              onClick={() => {
+                if (entryId) {
+                  openIndexingModal(entryId);
+                }
+              }}
+              disabled={!entryId}
+              variant="outline"
+            >
+              {currentIndexing ? 'Edit indexing' : 'Index this entry'}
+            </Button>
+          </div>
+          <p className="text-sm text-muted-foreground">Type, context, and tags to classify this entry in about 5 seconds.</p>
+          {currentIndexing ? (
+            <div className="space-y-2 text-sm">
+              <p>
+                Type: <span className="font-medium capitalize">{currentIndexing.type}</span>
+              </p>
+              <p>
+                Context: <span className="font-medium capitalize">{currentIndexing.context}</span>
+              </p>
+              <p>
+                Tags:{' '}
+                <span className="font-medium">
+                  {currentIndexing.tags.length > 0 ? currentIndexing.tags.map((tag) => `#${tag}`).join(', ') : 'None'}
+                </span>
+              </p>
+            </div>
+          ) : (
+            <p className="text-sm text-muted-foreground">No indexing saved for this entry yet.</p>
+          )}
+        </div>
         <div className="mt-6">
           <Button onClick={handleLogout} disabled={isLoggingOut} variant="outline">
             {isLoggingOut ? 'Logging out...' : 'Logout'}
           </Button>
         </div>
       </section>
+      {isIndexingModalOpen && entryId ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4" role="presentation">
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="quick-indexing-title"
+            className="w-full max-w-lg rounded-lg border bg-card p-6 text-card-foreground shadow-lg"
+          >
+            <h2 id="quick-indexing-title" className="text-lg font-semibold">
+              Quick indexing
+            </h2>
+            <p className="mt-1 text-sm text-muted-foreground">Classify this transcript in under 5 seconds.</p>
+
+            <div className="mt-5">
+              <p className="text-sm font-medium">Type</p>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {ENTRY_TYPE_OPTIONS.map((option) => {
+                  const isSelected = indexType === option;
+                  return (
+                    <button
+                      key={option}
+                      type="button"
+                      onClick={() => setIndexType(option)}
+                      className={`rounded-md border px-3 py-2 text-sm capitalize transition ${
+                        isSelected
+                          ? 'border-emerald-600 bg-emerald-100 text-emerald-900'
+                          : 'border-input bg-background hover:bg-accent hover:text-accent-foreground'
+                      }`}
+                    >
+                      {option}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="mt-5">
+              <p className="text-sm font-medium">Context</p>
+              <div className="mt-2 flex gap-2">
+                {(['work', 'life'] as EntryContext[]).map((option) => {
+                  const isSelected = indexContext === option;
+                  return (
+                    <button
+                      key={option}
+                      type="button"
+                      onClick={() => setIndexContext(option)}
+                      className={`rounded-md border px-3 py-2 text-sm capitalize transition ${
+                        isSelected
+                          ? 'border-cyan-600 bg-cyan-100 text-cyan-900'
+                          : 'border-input bg-background hover:bg-accent hover:text-accent-foreground'
+                      }`}
+                    >
+                      {option}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="mt-5">
+              <label htmlFor="index-tags" className="text-sm font-medium">
+                Tags
+              </label>
+              <input
+                id="index-tags"
+                type="text"
+                value={indexTagsInput}
+                onChange={(event) => setIndexTagsInput(event.target.value)}
+                placeholder="comma-separated tags"
+                className="mt-2 w-full rounded-md border bg-background px-3 py-2 text-sm"
+              />
+            </div>
+
+            <div className="mt-6 flex flex-wrap justify-end gap-2">
+              <Button onClick={handleSkipIndexing} variant="outline">
+                Skip for now
+              </Button>
+              <Button onClick={handleSaveIndexing} disabled={!indexType || !indexContext}>
+                Save indexing
+              </Button>
+            </div>
+          </section>
+        </div>
+      ) : null}
     </main>
   );
 }

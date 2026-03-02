@@ -12,6 +12,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.db import get_sessionmaker
+from app.entry_titles import deterministic_title_from_transcript, fallback_entry_title
 from app.models import AuditLog, AudioAsset, Entry, Transcript
 from app.openai_stt import transcribe_audio_bytes
 from app.settings import get_redis_url, get_settings
@@ -69,6 +70,11 @@ def run_transcription_job(entry_id: str, audio_asset_id: str | None = None) -> d
             source="stt",
         )
         session.add(transcript)
+        if not entry.title or not entry.title.strip():
+            entry.title = deterministic_title_from_transcript(
+                transcription.text,
+                fallback=fallback_entry_title(entry_uuid),
+            )
         entry.status = "ready"
         session.commit()
         session.refresh(transcript)

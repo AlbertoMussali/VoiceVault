@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
 from fastapi.testclient import TestClient
 
 from app.db import get_sessionmaker, reset_engine_cache
+from app.entry_titles import fallback_entry_title
 from app.main import create_app
 from app.models import Entry, User
 from app.settings import get_settings
@@ -77,8 +78,10 @@ class EntryCreateTests(unittest.TestCase):
         body = response.json()
         self.assertIn("entry_id", body)
         self.assertEqual(body["status"], "draft")
+        self.assertIn("title", body)
 
         entry_id = uuid.UUID(body["entry_id"])
+        self.assertEqual(body["title"], fallback_entry_title(entry_id))
         session = get_sessionmaker()()
         try:
             entry = session.get(Entry, entry_id)
@@ -86,6 +89,7 @@ class EntryCreateTests(unittest.TestCase):
             assert entry is not None
             self.assertEqual(entry.user_id, user_id)
             self.assertEqual(entry.status, "draft")
+            self.assertEqual(entry.title, fallback_entry_title(entry_id))
         finally:
             session.close()
 

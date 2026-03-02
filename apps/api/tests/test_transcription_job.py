@@ -13,6 +13,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.db import get_sessionmaker, initialize_schema, reset_engine_cache
+from app.entry_titles import fallback_entry_title
 from app.jobs import JOB_REGISTRY, run_transcription_job
 from app.models import AuditLog, AudioAsset, Entry, Transcript, User
 from app.openai_stt import TranscriptionResult
@@ -81,6 +82,7 @@ class TranscriptionJobTests(unittest.TestCase):
             self.assertIsNotNone(entry)
             assert entry is not None
             self.assertEqual(entry.status, "ready")
+            self.assertEqual(entry.title, "hello from stt")
 
             transcripts = session.query(Transcript).filter(Transcript.entry_id == entry_id).all()
             self.assertEqual(len(transcripts), 1)
@@ -109,7 +111,7 @@ class TranscriptionJobTests(unittest.TestCase):
 
         mocked_transcriber.assert_called_once()
 
-    def _create_entry_with_audio(self) -> tuple[uuid.UUID, uuid.UUID]:
+    def _create_entry_with_audio(self, *, with_title: bool = False) -> tuple[uuid.UUID, uuid.UUID]:
         storage = get_storage_backend()
         session = get_sessionmaker()()
         try:
@@ -120,6 +122,8 @@ class TranscriptionJobTests(unittest.TestCase):
             entry = Entry(user_id=user.id, status="transcribing")
             session.add(entry)
             session.flush()
+            if with_title:
+                entry.title = fallback_entry_title(entry.id)
 
             storage_key = f"entries/{entry.id}/audio/source.webm"
             payload = b"\x1aE\xdf\xa3test-webm"
@@ -134,6 +138,24 @@ class TranscriptionJobTests(unittest.TestCase):
             session.add(audio_asset)
             session.commit()
             return entry.id, audio_asset.id
+        finally:
+            session.close()
+
+    def test_run_transcription_job_preserves_existing_title(self) -> None:
+        entry_id, audio_asset_id = self._create_entry_with_audio(with_title=True)
+
+        with patch(
+            "app.jobs.transcribe_audio_bytes",
+            return_value=TranscriptionResult(text="updated text should not replace title", language_code="en"),
+        ):
+            run_transcription_job(str(entry_id), str(audio_asset_id))
+
+        session = get_sessionmaker()()
+        try:
+            entry = session.get(Entry, entry_id)
+            self.assertIsNotNone(entry)
+            assert entry is not None
+            self.assertEqual(entry.title, fallback_entry_title(entry_id))
         finally:
             session.close()
 
