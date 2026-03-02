@@ -1,8 +1,18 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ChangeEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import { useAuth } from '@/auth/AuthProvider';
 import { Button } from '@/components/ui/Button';
+import { createEntry, fetchEntryStatus, uploadEntryAudio } from '@/lib/entries';
+
+type PipelineState = 'idle' | 'creating' | 'uploading' | 'transcribing' | 'ready' | 'error';
+
+const READY_STATUSES = new Set(['ready', 'completed', 'done']);
+const ERROR_STATUSES = new Set(['error', 'failed', 'fatal']);
+
+function normalizeStatus(status: string | null): string {
+  return (status ?? '').trim().toLowerCase();
+}
 
 function formatDuration(totalSeconds: number): string {
   const hours = Math.floor(totalSeconds / 3600);
@@ -35,6 +45,12 @@ export function AppPage() {
   const chunksRef = useRef<BlobPart[]>([]);
   const timerRef = useRef<number | null>(null);
   const startedAtRef = useRef<number | null>(null);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [pipelineState, setPipelineState] = useState<PipelineState>('idle');
+  const [entryId, setEntryId] = useState<string | null>(null);
+  const [entryStatus, setEntryStatus] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const pollTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     return () => {
@@ -51,6 +67,22 @@ export function AppPage() {
       }
     };
   }, [recordingUrl]);
+
+  useEffect(
+    () => () => {
+      if (pollTimerRef.current !== null) {
+        window.clearInterval(pollTimerRef.current);
+      }
+    },
+    []
+  );
+
+  function stopPolling() {
+    if (pollTimerRef.current !== null) {
+      window.clearInterval(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+  }
 
   async function handleLogout() {
     setIsLoggingOut(true);
@@ -157,6 +189,75 @@ export function AppPage() {
     }
   }
 
+  function handleAudioSelection(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0] ?? null;
+    setSelectedFile(file);
+    setErrorMessage(null);
+  }
+
+  async function pollUntilComplete(nextEntryId: string) {
+    const poll = async () => {
+      try {
+        const result = await fetchEntryStatus(nextEntryId);
+        const normalized = normalizeStatus(result.status);
+        setEntryStatus(result.status);
+
+        if (READY_STATUSES.has(normalized)) {
+          setPipelineState('ready');
+          stopPolling();
+          return;
+        }
+
+        if (ERROR_STATUSES.has(normalized)) {
+          setPipelineState('error');
+          setErrorMessage('Transcription failed on the server.');
+          stopPolling();
+          return;
+        }
+
+        setPipelineState('transcribing');
+      } catch (error) {
+        setPipelineState('error');
+        stopPolling();
+        setErrorMessage(error instanceof Error ? error.message : 'Failed to poll entry status.');
+      }
+    };
+
+    await poll();
+    pollTimerRef.current = window.setInterval(() => {
+      void poll();
+    }, 3000);
+  }
+
+  async function handleStartUpload() {
+    if (!selectedFile) {
+      setErrorMessage('Pick an audio file first.');
+      return;
+    }
+
+    stopPolling();
+    setErrorMessage(null);
+    setEntryId(null);
+    setEntryStatus(null);
+
+    try {
+      setPipelineState('creating');
+      const created = await createEntry();
+      setEntryId(created.entryId);
+      setEntryStatus(created.status);
+
+      setPipelineState('uploading');
+      await uploadEntryAudio(created.entryId, selectedFile);
+
+      setPipelineState('transcribing');
+      await pollUntilComplete(created.entryId);
+    } catch (error) {
+      setPipelineState('error');
+      setErrorMessage(error instanceof Error ? error.message : 'Upload pipeline failed.');
+    }
+  }
+
+  const isBusy = pipelineState === 'creating' || pipelineState === 'uploading' || pipelineState === 'transcribing';
   return (
     <main className="min-h-screen bg-gradient-to-br from-sky-50 via-cyan-50 to-emerald-100 p-6">
       <section className="mx-auto mt-12 w-full max-w-2xl rounded-lg border bg-card p-8 text-card-foreground shadow-sm">
@@ -168,7 +269,6 @@ export function AppPage() {
             <dd className="font-medium">{typeof user?.email === 'string' ? user.email : 'Unknown'}</dd>
           </div>
         </dl>
-
         <section className="mt-6 rounded-md border bg-background p-4">
           <h2 className="text-base font-semibold">Record audio</h2>
           <p className="mt-1 text-sm text-muted-foreground">Capture a voice note as a WebM audio blob.</p>
@@ -205,7 +305,39 @@ export function AppPage() {
             </div>
           ) : null}
         </section>
-
+        <div className="mt-6 space-y-4 rounded-md border bg-background p-4">
+          <h2 className="text-base font-semibold">Audio Upload Pipeline</h2>
+          <p className="text-sm text-muted-foreground">Create entry, upload audio, then poll for transcription status.</p>
+          <input
+            type="file"
+            accept="audio/*"
+            onChange={handleAudioSelection}
+            className="block w-full text-sm file:mr-3 file:rounded-md file:border file:border-input file:bg-background file:px-3 file:py-2 file:text-sm"
+          />
+          <div className="flex items-center gap-3">
+            <Button onClick={handleStartUpload} disabled={!selectedFile || isBusy}>
+              {pipelineState === 'creating' && 'Creating entry...'}
+              {pipelineState === 'uploading' && 'Uploading audio...'}
+              {pipelineState === 'transcribing' && 'Polling status...'}
+              {(pipelineState === 'idle' || pipelineState === 'ready' || pipelineState === 'error') &&
+                'Start upload pipeline'}
+            </Button>
+            <span className="text-sm text-muted-foreground">
+              State: <span className="font-medium text-foreground">{pipelineState}</span>
+            </span>
+          </div>
+          {entryId ? (
+            <p className="text-sm">
+              Entry ID: <span className="font-mono">{entryId}</span>
+            </p>
+          ) : null}
+          {entryStatus ? (
+            <p className="text-sm">
+              Entry status: <span className="font-medium">{entryStatus}</span>
+            </p>
+          ) : null}
+          {errorMessage ? <p className="text-sm text-destructive">{errorMessage}</p> : null}
+        </div>
         <div className="mt-6">
           <Button onClick={handleLogout} disabled={isLoggingOut} variant="outline">
             {isLoggingOut ? 'Logging out...' : 'Logout'}
