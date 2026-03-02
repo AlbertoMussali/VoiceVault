@@ -80,7 +80,12 @@ _parse_tasks_stream() {
       # Strip trailing metadata comment from description (if present).
       desc=$(echo "$desc" | sed -E 's/[[:space:]]*<!--[[:space:]]*.*-->[[:space:]]*$//')
 
-      printf '%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$id" "$status" "$group" "$desc" "$line_no" "$tools" "$test_cmd" "$seq" "$deps"
+      # Downstream consumers sometimes intentionally exit early (e.g., first match).
+      # Under pipefail this can close stdout and trigger SIGPIPE on printf.
+      # Treat that as normal early-termination, not an error.
+      if ! printf '%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$id" "$status" "$group" "$desc" "$line_no" "$tools" "$test_cmd" "$seq" "$deps"; then
+        break
+      fi
     fi
   done < "$task_file"
 }
@@ -127,20 +132,20 @@ get_next_task() {
   # NOTE: Under `set -o pipefail`, the producer (`_parse_tasks_stream`) can exit
   # with SIGPIPE when `awk` exits early. That is expected and should not be
   # treated as an error for "get first match" helpers.
-  _parse_tasks_stream "$workspace" | awk -F'|' '$2=="pending" {print $1 "|" $4 "|" $5; exit}' || true
+  _parse_tasks_stream "$workspace" 2>/dev/null | awk -F'|' '$2=="pending" {print $1 "|" $4 "|" $5; exit}' || true
 }
 
 get_next_tasks() {
   local workspace="${1:-.}"
   local n="${2:-3}"
   # Same SIGPIPE caveat as get_next_task().
-  _parse_tasks_stream "$workspace" | awk -F'|' -v n="$n" '$2=="pending" {print; c++; if (c>=n) exit}' || true
+  _parse_tasks_stream "$workspace" 2>/dev/null | awk -F'|' -v n="$n" '$2=="pending" {print; c++; if (c>=n) exit}' || true
 }
 
 get_task_by_id() {
   local workspace="${1:-.}"
   local task_id="$2"
-  _parse_tasks_stream "$workspace" | awk -F'|' -v id="$task_id" '$1==id {print; exit}'
+  _parse_tasks_stream "$workspace" 2>/dev/null | awk -F'|' -v id="$task_id" '$1==id {print; exit}' || true
 }
 
 mark_task_complete() {
