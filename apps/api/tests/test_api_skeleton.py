@@ -18,7 +18,9 @@ from app.settings import get_settings
 class ApiSkeletonTests(unittest.TestCase):
     def setUp(self) -> None:
         self.original_api_version = os.environ.get("API_VERSION")
+        self.original_entry_auth_token = os.environ.get("ENTRY_AUTH_TOKEN")
         os.environ["API_VERSION"] = "9.9.9-test"
+        os.environ["ENTRY_AUTH_TOKEN"] = "entry-secret-test"
         get_settings.cache_clear()
         self.client = TestClient(create_app())
 
@@ -27,6 +29,10 @@ class ApiSkeletonTests(unittest.TestCase):
             os.environ.pop("API_VERSION", None)
         else:
             os.environ["API_VERSION"] = self.original_api_version
+        if self.original_entry_auth_token is None:
+            os.environ.pop("ENTRY_AUTH_TOKEN", None)
+        else:
+            os.environ["ENTRY_AUTH_TOKEN"] = self.original_entry_auth_token
         get_settings.cache_clear()
 
     def test_health_endpoint(self) -> None:
@@ -38,6 +44,25 @@ class ApiSkeletonTests(unittest.TestCase):
         response = self.client.get("/version")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {"version": "9.9.9-test"})
+
+    def test_entry_routes_require_authorization_header(self) -> None:
+        list_response = self.client.get("/api/v1/entries")
+        detail_response = self.client.get("/api/v1/entries/entry-1")
+
+        self.assertEqual(list_response.status_code, 401)
+        self.assertEqual(detail_response.status_code, 401)
+        self.assertEqual(list_response.json(), {"detail": "Unauthorized"})
+        self.assertEqual(detail_response.json(), {"detail": "Unauthorized"})
+
+    def test_entry_routes_accept_valid_bearer_token(self) -> None:
+        headers = {"Authorization": "Bearer entry-secret-test"}
+        list_response = self.client.get("/api/v1/entries", headers=headers)
+        detail_response = self.client.get("/api/v1/entries/entry-1", headers=headers)
+
+        self.assertEqual(list_response.status_code, 200)
+        self.assertEqual(list_response.json(), {"entries": []})
+        self.assertEqual(detail_response.status_code, 200)
+        self.assertEqual(detail_response.json(), {"entry_id": "entry-1"})
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ import os
 
 DEFAULT_DATABASE_URL = "postgresql+psycopg://voicevault:voicevault@db:5432/voicevault"
 DEFAULT_API_VERSION = "0.1.0"
+DEFAULT_ENTRY_AUTH_TOKEN = "dev-entry-token"
 
 
 def get_database_url() -> str:
@@ -20,6 +21,7 @@ class Settings:
 
     database_url: str
     api_version: str
+    entry_auth_token: str
 
 
 @lru_cache(maxsize=1)
@@ -28,4 +30,5 @@ def get_settings() -> Settings:
     return Settings(
         database_url=get_database_url(),
         api_version=os.getenv("API_VERSION", DEFAULT_API_VERSION),
+        entry_auth_token=os.getenv("ENTRY_AUTH_TOKEN", DEFAULT_ENTRY_AUTH_TOKEN),
     )
