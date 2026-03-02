@@ -6,12 +6,14 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from jwt import InvalidTokenError
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.datastructures import UploadFile
 
 from app.auth import decode_token
 from app.db import get_db
 from app.jobs import enqueue_registered_job
+from app.errors import ApiContractError, ErrorType
 from app.models import AudioAsset, Entry, User
 from app.settings import get_settings
 from app.storage import get_storage_backend
@@ -109,7 +111,12 @@ async def upload_entry_audio(
 ) -> dict[str, str | int]:
     entry = db.get(Entry, entry_id)
     if entry is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
+        raise ApiContractError(
+            status_code=status.HTTP_404_NOT_FOUND,
+            error_code="ENTRY_NOT_FOUND",
+            message="Entry not found.",
+            error_type=ErrorType.FATAL,
+        )
 
     request_content_type = request.headers.get("content-type", "")
     requested_name = request.headers.get("x-audio-filename", f"entry-{entry_id}.webm")
@@ -122,33 +129,55 @@ async def upload_entry_audio(
         form = await request.form()
         upload = form.get("audio") or form.get("file")
         if not isinstance(upload, UploadFile):
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing multipart audio file")
+            raise ApiContractError(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                error_code="AUDIO_MISSING_MULTIPART_FILE",
+                message="Missing multipart audio file.",
+                error_type=ErrorType.FATAL,
+            )
         body = await upload.read()
         if upload.filename:
             filename = Path(upload.filename).name or filename
         mime_type = upload.content_type or ""
     else:
         if not request_content_type.startswith("audio/"):
-            raise HTTPException(
+            raise ApiContractError(
                 status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-                detail="Content-Type must be audio/* or multipart/form-data",
+                error_code="AUDIO_UNSUPPORTED_MEDIA_TYPE",
+                message="Content-Type must be audio/* or multipart/form-data.",
+                error_type=ErrorType.FATAL,
             )
         body = await request.body()
 
     if not mime_type.startswith("audio/"):
-        raise HTTPException(
+        raise ApiContractError(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            detail="Audio file content type must be audio/*",
+            error_code="AUDIO_UNSUPPORTED_MEDIA_TYPE",
+            message="Audio file content type must be audio/*.",
+            error_type=ErrorType.FATAL,
         )
 
     if not body:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Audio payload is empty")
+        raise ApiContractError(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            error_code="AUDIO_EMPTY_PAYLOAD",
+            message="Audio payload is empty.",
+            error_type=ErrorType.FATAL,
+        )
 
     unique = uuid.uuid4()
     storage_key = f"entries/{entry_id}/audio/{unique}-{filename}"
 
     storage = get_storage_backend()
-    storage.put(storage_key, body)
+    try:
+        storage.put(storage_key, body)
+    except OSError as exc:
+        raise ApiContractError(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            error_code="AUDIO_STORAGE_UNAVAILABLE",
+            message="Audio storage is temporarily unavailable. Retry this upload.",
+            error_type=ErrorType.TRANSIENT,
+        ) from exc
 
     sha256_hex = hashlib.sha256(body).hexdigest()
     audio_asset = AudioAsset(
@@ -170,12 +199,17 @@ async def upload_entry_audio(
         )
         db.commit()
         db.refresh(audio_asset)
-    except Exception as exc:
+    except (SQLAlchemyError, Exception) as exc:
         db.rollback()
-        storage.delete(storage_key)
-        raise HTTPException(
+        try:
+            storage.delete(storage_key)
+        except OSError:
+            pass
+        raise ApiContractError(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Audio accepted but failed to enqueue transcription job",
+            error_code="AUDIO_ENQUEUE_FAILED",
+            message="Audio accepted but failed to enqueue transcription job. Retry this upload.",
+            error_type=ErrorType.TRANSIENT,
         ) from exc
 
     return {

@@ -20,6 +20,11 @@ from app.models import AudioAsset, Entry, User
 from app.settings import get_settings
 
 
+class _BrokenStorage:
+    def put(self, key: str, data: bytes) -> str:
+        raise OSError("disk unavailable")
+
+
 class EntryAudioUploadTests(unittest.TestCase):
     def setUp(self) -> None:
         self.original_database_url = os.environ.get("DATABASE_URL")
@@ -156,6 +161,15 @@ class EntryAudioUploadTests(unittest.TestCase):
             )
         self.assertEqual(response.status_code, 404)
         enqueue_mock.assert_not_called()
+        self.assertEqual(
+            response.json(),
+            {
+                "error_code": "ENTRY_NOT_FOUND",
+                "message": "Entry not found.",
+                "error_type": "fatal",
+                "retryable": False,
+            },
+        )
 
     def test_upload_audio_requires_audio_content_type(self) -> None:
         entry_id = self._create_user_and_entry()
@@ -167,6 +181,35 @@ class EntryAudioUploadTests(unittest.TestCase):
             )
         self.assertEqual(response.status_code, 415)
         enqueue_mock.assert_not_called()
+        self.assertEqual(
+            response.json(),
+            {
+                "error_code": "AUDIO_UNSUPPORTED_MEDIA_TYPE",
+                "message": "Content-Type must be audio/* or multipart/form-data.",
+                "error_type": "fatal",
+                "retryable": False,
+            },
+        )
+
+    def test_upload_audio_returns_transient_contract_when_storage_unavailable(self) -> None:
+        entry_id = self._create_user_and_entry()
+        with patch("app.routes.entries.get_storage_backend", return_value=_BrokenStorage()):
+            response = self.client.post(
+                f"/api/v1/entries/{entry_id}/audio",
+                data=b"abc",
+                headers={"content-type": "audio/webm", "Authorization": "Bearer entry-secret-test"},
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(
+            response.json(),
+            {
+                "error_code": "AUDIO_STORAGE_UNAVAILABLE",
+                "message": "Audio storage is temporarily unavailable. Retry this upload.",
+                "error_type": "transient",
+                "retryable": True,
+            },
+        )
 
 
 if __name__ == "__main__":
