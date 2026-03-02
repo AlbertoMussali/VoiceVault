@@ -105,21 +105,21 @@ Notes:
 
 - [x] [BE] Implement DB schema v1 (users, entries, transcripts, audio_assets, tags, audit_log). <!-- group: 200 -->
   - Done when: migrations create tables; app can connect and query.
-- [ ] [BE] Implement auth service: signup/login/refresh/logout with Argon2. <!-- group: 200 -->
+- [x] [BE] Implement auth service: signup/login/refresh/logout with Argon2. <!-- group: 200 -->
   - Done when: accounts can be created and sessions refreshed.
-- [ ] [FE] Implement auth UI (signup/login) + token refresh integration. <!-- group: 200 -->
+- [x] [FE] Implement auth UI (signup/login) + token refresh integration. <!-- group: 200 -->
   - Done when: user can login and reach `/app`.
-- [ ] [BE] Add authorization middleware (all entry routes require auth). <!-- group: 200 -->
+- [x] [BE] Add authorization middleware (all entry routes require auth). <!-- group: 200 -->
   - Done when: unauthenticated calls are rejected consistently.
-- [ ] [BE] Implement storage abstraction + local disk backend. <!-- group: 200 -->
+- [x] [BE] Implement storage abstraction + local disk backend. <!-- group: 200 -->
   - Done when: audio can be stored/retrieved by a storage key.
-- [ ] [BE] Add file upload skeleton for `POST /entries/{id}/audio` (store blob + metadata). <!-- group: 200 -->
+- [x] [BE] Add file upload skeleton for `POST /entries/{id}/audio` (store blob + metadata). <!-- group: 200 -->
   - Done when: blob persists; metadata recorded in DB; endpoint validated.
-- [ ] [BE] Integrate RQ worker process + job registry in compose. <!-- group: 200 -->
+- [x] [BE] Integrate RQ worker process + job registry in compose. <!-- group: 200 -->
   - Done when: worker runs and can execute a stub job.
-- [ ] [BE] Add audit logging middleware for auth + entry events (no content). <!-- group: 200 -->
+- [x] [BE] Add audit logging middleware for auth + entry events (no content). <!-- group: 200 -->
   - Done when: DB audit rows exist for key actions.
-- [ ] [QA] Add backend unit tests for auth + storage + basic CRUD. <!-- group: 200 -->
+- [x] [QA] Add backend unit tests for auth + storage + basic CRUD. <!-- group: 200 -->
   - Done when: `make test` runs these and passes.
 - [x] [INF] Add env management: `.env.example` + documented secrets strategy (dev/prod). <!-- group: 200 -->
   - Done when: new dev can boot from docs + `.env.example`.
