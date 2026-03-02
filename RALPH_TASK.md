@@ -103,7 +103,7 @@ Notes:
 
 ## Phase 1 — Core backend platform: auth, storage, jobs, base schema
 
-- [ ] [BE] Implement DB schema v1 (users, entries, transcripts, audio_assets, tags, audit_log). <!-- group: 200 -->
+- [x] [BE] Implement DB schema v1 (users, entries, transcripts, audio_assets, tags, audit_log). <!-- group: 200 -->
   - Done when: migrations create tables; app can connect and query.
 - [ ] [BE] Implement auth service: signup/login/refresh/logout with Argon2. <!-- group: 200 -->
   - Done when: accounts can be created and sessions refreshed.
