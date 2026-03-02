@@ -18,8 +18,4 @@ lint:
 	@echo "No lint configuration found; lint target is a no-op."
 
 test:
-	@if [ -f todo.ts ]; then \
-		npx ts-node todo.ts list; \
-	else \
-		echo "No todo.ts found; test target is a no-op."; \
-	fi
+	UV_CACHE_DIR=/tmp/uv-cache uv run python -m unittest discover -s apps/api/tests
