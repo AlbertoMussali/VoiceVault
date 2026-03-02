@@ -48,10 +48,15 @@ services:
       - "3000:3000"
 
   worker:
-    image: node:20-alpine
+    image: ghcr.io/astral-sh/uv:python3.12-bookworm
     restart: unless-stopped
     working_dir: /workspace
-    command: ["sh", "-c", "echo worker-placeholder-replace-command && tail -f /dev/null"]
+    command:
+      [
+        "sh",
+        "-lc",
+        "cd /workspace/apps/api && uv run --with-requirements requirements.txt python -m app.worker",
+      ]
     volumes:
       - ./:/workspace
     environment:
