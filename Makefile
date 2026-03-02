@@ -1,4 +1,4 @@
-.PHONY: dev-up dev-down lint test backup-create backup-restore backup-restore-dry-run
+.PHONY: dev-up dev-down dev-local lint test backup-create backup-restore backup-restore-dry-run
 
 dev-up:
 	@if [ -f docker-compose.yml ] || [ -f compose.yml ] || [ -f compose.yaml ]; then \
@@ -13,6 +13,9 @@ dev-down:
 	else \
 		echo "No Docker Compose file found; skipping dev-down."; \
 	fi
+
+dev-local:
+	./scripts/dev-local.sh
 
 lint:
 	@echo "No lint configuration found; lint target is a no-op."
