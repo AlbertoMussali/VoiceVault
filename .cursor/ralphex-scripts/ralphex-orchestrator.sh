@@ -185,6 +185,11 @@ EOT
     return 1
   fi
 
+  # Stage first so codex-resolved files clear unmerged index entries.
+  (cd "$orchestrator_dir" && git add -A)
+  (cd "$orchestrator_dir" && git reset -q -- RALPHEX_TASK.md RALPH_TASK.md 2>/dev/null || true)
+  (cd "$orchestrator_dir" && git reset -q -- .ralphex .ralph 2>/dev/null || true)
+
   local unresolved
   unresolved=$(cd "$orchestrator_dir" && git diff --name-only --diff-filter=U || true)
   if [[ -n "$unresolved" ]]; then

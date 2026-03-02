@@ -227,8 +227,35 @@ _auto_resolve_merge_conflict() {
 
   _run_log_json "$jobs_file" --arg run_id "$run_id" --arg task_id "$task_id" --arg branch "$task_branch" --arg status "MERGE_FIX_STARTED" '{ts:now|todateiso8601, run_id:$run_id, task_id:$task_id, branch:$branch, status:$status}'
 
-  if ! git -C "$workspace" worktree add -f -b "$mergefix_branch" "$fix_dir" "$integration_branch" >>"$merge_log" 2>&1; then
-    echo "merge-fix worktree create failed for $mergefix_branch" >>"$merge_log"
+  local has_fix_worktree="false"
+  if git -C "$workspace" worktree list --porcelain | awk '/^worktree /{print substr($0,10)}' | grep -Fxq "$fix_dir"; then
+    has_fix_worktree="true"
+  fi
+
+  if [[ "$has_fix_worktree" == "false" ]]; then
+    if git -C "$workspace" show-ref --verify --quiet "refs/heads/$mergefix_branch"; then
+      if ! git -C "$workspace" worktree add -f "$fix_dir" "$mergefix_branch" >>"$merge_log" 2>&1; then
+        echo "merge-fix worktree attach failed for $mergefix_branch" >>"$merge_log"
+        return 1
+      fi
+    else
+      if ! git -C "$workspace" worktree add -f -b "$mergefix_branch" "$fix_dir" "$integration_branch" >>"$merge_log" 2>&1; then
+        echo "merge-fix worktree create failed for $mergefix_branch" >>"$merge_log"
+        return 1
+      fi
+    fi
+  fi
+
+  # Reuse-safe baseline: ensure prior failed attempts do not poison retries.
+  if ! (
+    cd "$fix_dir" &&
+    git merge --abort >/dev/null 2>&1 || true
+    git rebase --abort >/dev/null 2>&1 || true
+    git cherry-pick --abort >/dev/null 2>&1 || true
+    git reset --hard "$integration_branch" >/dev/null 2>&1
+    git clean -fd >/dev/null 2>&1
+  ) >>"$merge_log" 2>&1; then
+    echo "merge-fix baseline reset failed for $mergefix_branch" >>"$merge_log"
     return 1
   fi
 
@@ -280,16 +307,17 @@ EOT
   (cd "$fix_dir" && git restore -SW -- RALPHEX_TASK.md RALPH_TASK.md 2>/dev/null || true)
   rm -rf "$fix_dir/.ralphex" "$fix_dir/.ralph" >/dev/null 2>&1 || true
 
+  # Stage first so files resolved by codex are recorded from unmerged -> merged.
+  (cd "$fix_dir" && git add -A)
+  (cd "$fix_dir" && git reset -q -- RALPHEX_TASK.md RALPH_TASK.md 2>/dev/null || true)
+  (cd "$fix_dir" && git reset -q -- .ralphex .ralph 2>/dev/null || true)
+
   local unresolved
   unresolved=$(cd "$fix_dir" && git diff --name-only --diff-filter=U || true)
   if [[ -n "$unresolved" ]]; then
     echo "merge-fix unresolved conflicts for $mergefix_branch: $unresolved" >>"$merge_log"
     return 1
   fi
-
-  (cd "$fix_dir" && git add -A)
-  (cd "$fix_dir" && git reset -q -- RALPHEX_TASK.md RALPH_TASK.md 2>/dev/null || true)
-  (cd "$fix_dir" && git reset -q -- .ralphex .ralph 2>/dev/null || true)
 
   if ! (cd "$fix_dir" && git -c user.name="ralphex" -c user.email="ralphex@local" commit --no-edit) >>"$merge_log" 2>&1; then
     echo "merge-fix commit failed for $mergefix_branch" >>"$merge_log"
