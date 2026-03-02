@@ -11,3 +11,6 @@
 .ralph-worktrees/
 .ralph/parallel/
 .ralph/session_id
+
+# Local ralphex logs/state (keep out of git to avoid merge churn)
+.ralph/
