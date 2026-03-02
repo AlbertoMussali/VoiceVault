@@ -1,5 +1,11 @@
 # Ralph config (may contain API key)
+.cursor/ralph-config.json
 .cursor/ralphex-config.json
+
+# Environment files
+.env
+.env.local
+.env.*.local
 
 # Ralphex runtime artifacts
 .ralph-worktrees/
