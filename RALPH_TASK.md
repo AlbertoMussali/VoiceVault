@@ -90,7 +90,7 @@ Notes:
   - Done when: API container serves health/version endpoints.
 - [x] [FE] Implement Vite + React skeleton with routes (`/login`, `/signup`, `/app`). <!-- group: 100 -->
   - Done when: web container serves UI and routes render.
-- [ ] [INF] Add CI pipeline (lint + tests for FE/BE). <!-- group: 100 -->
+- [x] [INF] Add CI pipeline (lint + tests for FE/BE). <!-- group: 100 -->
   - Done when: CI runs on PR/commit and is green on main branch.
 - [x] [BE] Wire Alembic migrations and DB connectivity end-to-end. <!-- group: 100 -->
   - Done when: `alembic upgrade head` runs in container against compose Postgres.
