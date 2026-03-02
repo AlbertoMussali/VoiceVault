@@ -132,7 +132,7 @@ Notes:
   - Done when: returns `entry_id`; entry stored with correct initial status.
 - [x] [FE] Implement upload pipeline: create entry → upload audio → poll status. <!-- group: 300 -->
   - Done when: UI shows uploading/transcribing/ready/error states.
-- [ ] [BE] Implement multipart audio upload fully: store blob, set status=transcribing, enqueue job. <!-- group: 300 -->
+- [x] [BE] Implement multipart audio upload fully: store blob, set status=transcribing, enqueue job. <!-- group: 300 -->
   - Done when: upload triggers job and persists audio asset record.
 - [ ] [AI] Implement transcription worker job using OpenAI STT and store transcript v1. <!-- group: 300 -->
   - Done when: transcript saved; entry status flips to ready.
