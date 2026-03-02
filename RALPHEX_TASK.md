@@ -195,9 +195,9 @@ Notes:
   - Done when: user can edit claim text without losing citations.
 - [x] [BE] Implement text export job producing downloadable report with dated quotes. <!-- group: 600 -->
   - Done when: export is reproducible and stored as a job artifact.
-- [ ] [FE] Implement export UI (request → status → download). <!-- group: 600 -->
+- [x] [FE] Implement export UI (request → status → download). <!-- group: 600 -->
   - Done when: user can generate and download export without manual ops.
-- [ ] [QA] Add brag export test (snapshot or deterministic fixtures). <!-- group: 600 -->
+- [x] [QA] Add brag export test (snapshot or deterministic fixtures). <!-- group: 600 -->
   - Done when: export format remains stable.
 
 ## Phase 6 — Ask v1 (sources-first + optional summary with enforced citations)

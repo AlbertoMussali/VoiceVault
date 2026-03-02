@@ -5,6 +5,12 @@ import { useAuth } from '@/auth/AuthProvider';
 import { Button } from '@/components/ui/Button';
 import { listBragDrafts, updateBragDraft, type BragDraft } from '@/lib/bragDrafts';
 import {
+  downloadBragExportArtifact,
+  fetchBragExportJob,
+  requestBragExportJob,
+  type BragExportJob
+} from '@/lib/bragExport';
+import {
   EntryApiError,
   createEntry,
   fetchEntriesTimeline,
@@ -50,6 +56,8 @@ const ENTRY_TYPE_OPTIONS = ['win', 'blocker', 'idea', 'task', 'learning'];
 const MAX_QUOTE_CHARS = 160;
 const BRAG_BUCKETS = ['Impact', 'Execution', 'Leadership', 'Collaboration', 'Growth'] as const;
 const BRAG_UNASSIGNED_BUCKET = 'Unassigned';
+const BRAG_EXPORT_READY_STATUSES = new Set(['completed']);
+const BRAG_EXPORT_FAILED_STATUSES = new Set(['failed', 'error']);
 
 function normalizeQuote(raw: string | null | undefined): string | null {
   if (typeof raw !== 'string') {
@@ -337,6 +345,12 @@ export function AppPage() {
   const [bragDateTo, setBragDateTo] = useState('');
   const [bragDrafts, setBragDrafts] = useState<BragDraft[]>(() => listBragDrafts());
   const [expandedEvidenceByDraft, setExpandedEvidenceByDraft] = useState<Record<string, boolean>>({});
+  const [bragExportJob, setBragExportJob] = useState<BragExportJob | null>(null);
+  const [isRequestingBragExport, setIsRequestingBragExport] = useState(false);
+  const [isCheckingBragExport, setIsCheckingBragExport] = useState(false);
+  const [isDownloadingBragExport, setIsDownloadingBragExport] = useState(false);
+  const [bragExportNotice, setBragExportNotice] = useState<string | null>(null);
+  const [bragExportError, setBragExportError] = useState<string | null>(null);
   const [searchQueryInput, setSearchQueryInput] = useState('');
   const [submittedSearchQuery, setSubmittedSearchQuery] = useState('');
   const [isSearchLoading, setIsSearchLoading] = useState(false);
@@ -347,6 +361,7 @@ export function AppPage() {
   const [indexContext, setIndexContext] = useState<EntryContext | null>(null);
   const [indexTagsInput, setIndexTagsInput] = useState('');
   const pollTimerRef = useRef<number | null>(null);
+  const bragExportPollTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     return () => {
@@ -368,6 +383,9 @@ export function AppPage() {
     () => () => {
       if (pollTimerRef.current !== null) {
         window.clearInterval(pollTimerRef.current);
+      }
+      if (bragExportPollTimerRef.current !== null) {
+        window.clearInterval(bragExportPollTimerRef.current);
       }
     },
     []
@@ -424,6 +442,13 @@ export function AppPage() {
     if (pollTimerRef.current !== null) {
       window.clearInterval(pollTimerRef.current);
       pollTimerRef.current = null;
+    }
+  }
+
+  function stopBragExportPolling() {
+    if (bragExportPollTimerRef.current !== null) {
+      window.clearInterval(bragExportPollTimerRef.current);
+      bragExportPollTimerRef.current = null;
     }
   }
 
@@ -902,6 +927,117 @@ export function AppPage() {
     }));
   }
 
+  async function loadBragExportStatus(jobId: string, options?: { showCheckingIndicator?: boolean }): Promise<BragExportJob | null> {
+    const showCheckingIndicator = options?.showCheckingIndicator === true;
+
+    if (showCheckingIndicator) {
+      setIsCheckingBragExport(true);
+    }
+
+    try {
+      const job = await fetchBragExportJob(jobId);
+      setBragExportJob(job);
+
+      const normalizedStatus = job.status.trim().toLowerCase();
+      if (BRAG_EXPORT_READY_STATUSES.has(normalizedStatus)) {
+        stopBragExportPolling();
+        setBragExportNotice('Export is ready to download.');
+        setBragExportError(null);
+      } else if (BRAG_EXPORT_FAILED_STATUSES.has(normalizedStatus)) {
+        stopBragExportPolling();
+        setBragExportError(job.errorMessage ?? 'Export failed.');
+      }
+
+      return job;
+    } catch (error) {
+      setBragExportError(error instanceof Error ? error.message : 'Failed to fetch export status.');
+      return null;
+    } finally {
+      if (showCheckingIndicator) {
+        setIsCheckingBragExport(false);
+      }
+    }
+  }
+
+  function startBragExportPolling(jobId: string) {
+    stopBragExportPolling();
+    bragExportPollTimerRef.current = window.setInterval(() => {
+      void loadBragExportStatus(jobId);
+    }, 3000);
+  }
+
+  async function handleRequestBragExport() {
+    if (isRequestingBragExport || isCheckingBragExport || isDownloadingBragExport) {
+      return;
+    }
+
+    stopBragExportPolling();
+    setIsRequestingBragExport(true);
+    setBragExportNotice(null);
+    setBragExportError(null);
+
+    try {
+      const job = await requestBragExportJob();
+      setBragExportJob(job);
+
+      const normalizedStatus = job.status.trim().toLowerCase();
+      if (BRAG_EXPORT_READY_STATUSES.has(normalizedStatus)) {
+        setBragExportNotice('Export is ready to download.');
+        return;
+      }
+
+      if (BRAG_EXPORT_FAILED_STATUSES.has(normalizedStatus)) {
+        setBragExportError(job.errorMessage ?? 'Export failed.');
+        return;
+      }
+
+      setBragExportNotice('Export requested. Generating report now.');
+      startBragExportPolling(job.id);
+    } catch (error) {
+      setBragExportError(error instanceof Error ? error.message : 'Failed to request export.');
+    } finally {
+      setIsRequestingBragExport(false);
+    }
+  }
+
+  async function handleCheckBragExportStatus() {
+    if (!bragExportJob || isCheckingBragExport || isRequestingBragExport || isDownloadingBragExport) {
+      return;
+    }
+
+    setBragExportNotice(null);
+    await loadBragExportStatus(bragExportJob.id, { showCheckingIndicator: true });
+  }
+
+  async function handleDownloadBragExport() {
+    if (!bragExportJob || isDownloadingBragExport || isRequestingBragExport || isCheckingBragExport) {
+      return;
+    }
+
+    setIsDownloadingBragExport(true);
+    setBragExportError(null);
+
+    try {
+      const normalizedStatus = bragExportJob.status.trim().toLowerCase();
+      const latest =
+        BRAG_EXPORT_READY_STATUSES.has(normalizedStatus)
+          ? bragExportJob
+          : await loadBragExportStatus(bragExportJob.id, { showCheckingIndicator: false });
+
+      if (!latest || !BRAG_EXPORT_READY_STATUSES.has(latest.status.trim().toLowerCase())) {
+        setBragExportError('Export is not ready yet.');
+        return;
+      }
+
+      await downloadBragExportArtifact(latest);
+      setBragExportNotice('Download started.');
+    } catch (error) {
+      setBragExportError(error instanceof Error ? error.message : 'Failed to download export.');
+    } finally {
+      setIsDownloadingBragExport(false);
+    }
+  }
+
   const isBusy = pipelineState === 'creating' || pipelineState === 'uploading' || pipelineState === 'transcribing';
   const currentIndexing = entryId ? indexingByEntry[entryId] : null;
   const retryLabel =
@@ -984,6 +1120,8 @@ export function AppPage() {
     return byBucket;
   }, [bragDraftsInRange]);
   const hasSearchAttempt = useMemo(() => submittedSearchQuery.length > 0, [submittedSearchQuery]);
+  const bragExportStatusLabel = bragExportJob?.status ?? null;
+  const isBragExportReady = BRAG_EXPORT_READY_STATUSES.has((bragExportJob?.status ?? '').trim().toLowerCase());
 
   return (
     <main className="min-h-screen bg-gradient-to-br from-sky-50 via-cyan-50 to-emerald-100 p-6">
@@ -1247,6 +1385,39 @@ export function AppPage() {
             >
               Clear range
             </Button>
+          </div>
+          <div className="rounded-md border border-cyan-200 bg-cyan-50 p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h3 className="text-sm font-semibold text-cyan-900">Export report</h3>
+              {bragExportStatusLabel ? (
+                <span className="rounded-full border border-cyan-300 bg-white px-2 py-1 text-xs font-medium text-cyan-900">
+                  Status: {bragExportStatusLabel}
+                </span>
+              ) : null}
+            </div>
+            <p className="mt-1 text-xs text-cyan-900/80">Request a text export, check job status, and download when ready.</p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Button onClick={handleRequestBragExport} disabled={isRequestingBragExport || isCheckingBragExport || isDownloadingBragExport}>
+                {isRequestingBragExport ? 'Requesting export...' : 'Request export'}
+              </Button>
+              <Button
+                onClick={handleCheckBragExportStatus}
+                variant="outline"
+                disabled={!bragExportJob || isRequestingBragExport || isCheckingBragExport || isDownloadingBragExport}
+              >
+                {isCheckingBragExport ? 'Checking status...' : 'Check status'}
+              </Button>
+              <Button
+                onClick={handleDownloadBragExport}
+                variant="outline"
+                disabled={!bragExportJob || !isBragExportReady || isRequestingBragExport || isCheckingBragExport || isDownloadingBragExport}
+              >
+                {isDownloadingBragExport ? 'Downloading...' : 'Download export'}
+              </Button>
+            </div>
+            {bragExportJob ? <p className="mt-2 text-xs text-cyan-900/80">Job ID: <span className="font-mono">{bragExportJob.id}</span></p> : null}
+            {bragExportNotice ? <p className="mt-2 text-xs text-emerald-700">{bragExportNotice}</p> : null}
+            {bragExportError ? <p className="mt-2 text-xs text-destructive">{bragExportError}</p> : null}
           </div>
           <div className="space-y-3">
             {[...BRAG_BUCKETS, BRAG_UNASSIGNED_BUCKET].map((bucket) => (

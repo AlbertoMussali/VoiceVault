@@ -187,6 +187,53 @@ class BragExportApiTests(unittest.TestCase):
         self.assertEqual(denied.status_code, 404)
         self.assertEqual(denied.json(), {"detail": "Export job not found"})
 
+    def test_brag_export_report_format_is_deterministic(self) -> None:
+        self._create_bullet(
+            self.user_id,
+            "growth",
+            "Built migration runbook\nfor zero-downtime changes",
+            datetime(2026, 2, 12, 9, 0, tzinfo=timezone.utc),
+        )
+        self._create_bullet(
+            self.user_id,
+            "impact",
+            "Reduced p95 API latency by 37%",
+            datetime(2026, 1, 3, 8, 0, tzinfo=timezone.utc),
+        )
+        self._create_bullet(
+            self.user_id,
+            "impact",
+            "Eliminated retry storms during deploys",
+            datetime(2026, 1, 20, 11, 30, tzinfo=timezone.utc),
+        )
+
+        with patch("app.routes.brag_export.enqueue_registered_job") as enqueue_mock:
+            enqueue_mock.return_value = type("JobStub", (), {"id": "rq-brag-456"})()
+            created = self.client.post("/api/v1/brag/export", headers=self._auth_headers())
+
+        self.assertEqual(created.status_code, 202)
+        export_job_id = created.json()["id"]
+
+        result = run_brag_text_export_job(export_job_id)
+        self.assertEqual(result["status"], "ok")
+
+        download = self.client.get(f"/api/v1/brag/export/{export_job_id}/download", headers=self._auth_headers())
+        self.assertEqual(download.status_code, 200)
+
+        expected_report = (
+            "VoiceVault Brag Report\n"
+            "\n"
+            "Dated Quotes\n"
+            "\n"
+            "Impact\n"
+            '- [2026-01-03] "Reduced p95 API latency by 37%"\n'
+            '- [2026-01-20] "Eliminated retry storms during deploys"\n'
+            "\n"
+            "Growth\n"
+            '- [2026-02-12] "Built migration runbook for zero-downtime changes"\n'
+        )
+        self.assertEqual(download.content.decode("utf-8"), expected_report)
+
 
 if __name__ == "__main__":
     unittest.main()
