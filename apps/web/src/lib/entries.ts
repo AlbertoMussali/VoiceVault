@@ -24,6 +24,11 @@ export type EntryDetail = EntryStatusResponse & {
   transcript: TranscriptResponse | null;
   transcriptText: string | null;
   audioUrl: string | null;
+  entryType: string | null;
+  context: string | null;
+  tags: string[];
+  sentimentLabel: string | null;
+  sentimentScore: number | null;
 };
 
 export type EntryDetailResponse = EntryDetail;
@@ -34,10 +39,13 @@ export type TimelineEntry = {
   title: string | null;
   createdAt: string | null;
   occurredAt: string | null;
+  durationSeconds: number | null;
   entryType: string | null;
   context: string | null;
   tags: string[];
   quote: string | null;
+  sentimentLabel: string | null;
+  sentimentScore: number | null;
 };
 
 export type SearchResult = {
@@ -339,11 +347,37 @@ function parseTimelineEntry(payload: unknown): TimelineEntry | null {
     title: pickString(data.title, data.entry_title, data.entryTitle),
     createdAt: pickString(data.created_at, data.createdAt),
     occurredAt: pickString(data.occurred_at, data.occurredAt),
+    durationSeconds: parseEntryDurationSeconds(data),
     entryType: pickString(data.entry_type, data.entryType, data.type),
     context: pickString(data.context),
     tags: parseTagsFromEntryPayload(payload),
-    quote: parseQuoteFromEntryPayload(payload)
+    quote: parseQuoteFromEntryPayload(payload),
+    sentimentLabel: pickString(data.sentiment_label, data.sentimentLabel),
+    sentimentScore: pickNumber(data.sentiment_score, data.sentimentScore)
   };
+}
+
+function parseEntryDurationSeconds(data: Record<string, unknown>): number | null {
+  const candidates = [
+    data.duration_seconds,
+    data.durationSeconds,
+    data.audio_duration_seconds,
+    data.audioDurationSeconds
+  ];
+
+  for (const value of candidates) {
+    if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+      return value;
+    }
+    if (typeof value === 'string') {
+      const parsed = Number.parseFloat(value);
+      if (Number.isFinite(parsed) && parsed >= 0) {
+        return parsed;
+      }
+    }
+  }
+
+  return null;
 }
 
 function parseSearchResult(payload: unknown): SearchResult | null {
@@ -452,9 +486,15 @@ export async function fetchEntryDetail(entryId: string): Promise<EntryDetail> {
   return {
     entryId: pickEntryId(payload) ?? entryId,
     status: pickEntryStatus(payload),
+    title: pickEntryTitle(payload),
     transcript,
     transcriptText: transcript?.text ?? pickTranscriptText(payload),
-    audioUrl: pickAudioUrl(payload)
+    audioUrl: pickAudioUrl(payload),
+    entryType: pickString(asRecord(payload)?.entry_type, asRecord(payload)?.entryType, asRecord(payload)?.type),
+    context: pickString(asRecord(payload)?.context),
+    tags: parseTagsFromEntryPayload(payload),
+    sentimentLabel: pickString(asRecord(payload)?.sentiment_label, asRecord(payload)?.sentimentLabel),
+    sentimentScore: pickNumber(asRecord(payload)?.sentiment_score, asRecord(payload)?.sentimentScore)
   };
 }
 

@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 
 import { useAuth } from '@/auth/AuthProvider';
 import { AskSummaryRenderer, type AskSummaryCitation, type AskSummarySentence } from '@/components/AskSummaryRenderer';
 import { Button } from '@/components/ui/Button';
 import { deleteAccount } from '@/lib/account';
+import { summarizeAskQuery, submitAskQuery, type AskSource } from '@/lib/ask';
 import { listBragDrafts, updateBragDraft, type BragDraft } from '@/lib/bragDrafts';
 import {
   downloadBragExportArtifact,
@@ -35,6 +36,7 @@ type PipelineState = 'idle' | 'creating' | 'uploading' | 'transcribing' | 'ready
 type RetryAction = 'restart_pipeline' | 'retry_upload' | 'resume_polling' | null;
 type PipelineStep = 'creating' | 'uploading' | 'polling';
 type EntryContext = 'work' | 'life';
+type TimelineWindow = 'all' | '1y' | '6m' | '1m' | '1w' | '1d';
 
 type EntryIndexingData = {
   type: string;
@@ -48,10 +50,13 @@ type TimelineEntryRecord = {
   title: string | null;
   createdAt: string | null;
   occurredAt: string | null;
+  durationSeconds: number | null;
   type: string | null;
   context: EntryContext | null;
   tags: string[];
   quote: string | null;
+  sentimentLabel: string | null;
+  sentimentScore: number | null;
 };
 
 type AskPreviewOptions = {
@@ -84,6 +89,7 @@ const DATA_EXPORT_FAILED_STATUSES = new Set(['failed', 'error', 'fatal']);
 const SENSITIVE_TAG_TOKENS = new Set(['sensitive', 'work_sensitive', 'work-sensitive', 'confidential', 'private', 'raw_only', 'raw-only']);
 const ASK_SUMMARY_SENTENCE_LIMIT = 4;
 const DELETE_ACCOUNT_CONFIRMATION_TEXT = 'DELETE MY ACCOUNT';
+const TIMELINE_WINDOW_OPTIONS: TimelineWindow[] = ['all', '1y', '6m', '1m', '1w', '1d'];
 
 function isSensitiveTimelineEntry(entry: TimelineEntryRecord | undefined): boolean {
   if (!entry) {
@@ -185,30 +191,6 @@ function formatBragDate(raw: string): string {
   return date.toLocaleDateString();
 }
 
-function summarizeSnippetSentence(text: string): string {
-  const normalized = text.replace(/\s+/g, ' ').trim();
-  if (!normalized) {
-    return 'Source snippet was empty.';
-  }
-
-  const firstSentence = normalized.match(/.*?[.!?](?:\s|$)/)?.[0]?.trim();
-  return firstSentence ?? normalized;
-}
-
-function buildAskSummarySentences(question: string, citations: AskSummaryCitation[]): AskSummarySentence[] {
-  const questionText = question.trim();
-  return citations.slice(0, ASK_SUMMARY_SENTENCE_LIMIT).map((citation, index) => {
-    const baseSentence = summarizeSnippetSentence(citation.snippetText);
-    const text = index === 0 && questionText ? `For "${questionText}", ${baseSentence}` : baseSentence;
-
-    return {
-      id: `${citation.snippetId}-sentence`,
-      text,
-      citationSnippetIds: [citation.snippetId]
-    };
-  });
-}
-
 function readStoredIndexing(): Record<string, EntryIndexingData> {
   if (typeof window === 'undefined') {
     return {};
@@ -301,10 +283,21 @@ function readStoredTimeline(): Record<string, TimelineEntryRecord> {
         title: typeof record.title === 'string' ? record.title : null,
         createdAt: typeof record.createdAt === 'string' ? record.createdAt : null,
         occurredAt: typeof record.occurredAt === 'string' ? record.occurredAt : null,
+        durationSeconds:
+          typeof record.durationSeconds === 'number' && Number.isFinite(record.durationSeconds)
+            ? record.durationSeconds
+            : typeof record.durationSeconds === 'string'
+              ? Number.parseFloat(record.durationSeconds) || null
+              : null,
         type,
         context,
         tags: Array.from(new Set(tags)),
-        quote: normalizeQuote(typeof record.quote === 'string' ? record.quote : null)
+        quote: normalizeQuote(typeof record.quote === 'string' ? record.quote : null),
+        sentimentLabel: typeof record.sentimentLabel === 'string' ? record.sentimentLabel : null,
+        sentimentScore:
+          typeof record.sentimentScore === 'number' && Number.isFinite(record.sentimentScore)
+            ? record.sentimentScore
+            : null
       };
     }
 
@@ -374,10 +367,13 @@ function mapTimelineEntry(entry: TimelineEntry): TimelineEntryRecord {
     title: entry.title,
     createdAt: normalizeIsoDate(entry.createdAt),
     occurredAt: normalizeIsoDate(entry.occurredAt),
+    durationSeconds: typeof entry.durationSeconds === 'number' && Number.isFinite(entry.durationSeconds) ? entry.durationSeconds : null,
     type,
     context,
     tags: Array.from(new Set(entry.tags.map((tag) => tag.trim().toLowerCase()).filter((tag) => tag.length > 0))),
-    quote: normalizeQuote(entry.quote)
+    quote: normalizeQuote(entry.quote),
+    sentimentLabel: entry.sentimentLabel ? entry.sentimentLabel.trim().toLowerCase() : null,
+    sentimentScore: typeof entry.sentimentScore === 'number' && Number.isFinite(entry.sentimentScore) ? entry.sentimentScore : null
   };
 }
 
@@ -400,9 +396,139 @@ function formatDuration(totalSeconds: number): string {
   return `${minutePart}:${secondPart}`;
 }
 
+function formatDurationMinutes(totalSeconds: number): string {
+  if (totalSeconds < 60) {
+    return `${Math.round(totalSeconds)}s`;
+  }
+
+  const minutes = totalSeconds / 60;
+  return `${minutes.toFixed(minutes >= 10 ? 0 : 1)}m`;
+}
+
+function buildSplinePath(points: Array<{ x: number; y: number }>): string {
+  if (points.length === 0) {
+    return '';
+  }
+  if (points.length === 1) {
+    const first = points[0];
+    return `M ${first.x} ${first.y}`;
+  }
+
+  const commands = [`M ${points[0].x} ${points[0].y}`];
+
+  for (let index = 0; index < points.length - 1; index += 1) {
+    const p0 = points[index - 1] ?? points[index];
+    const p1 = points[index];
+    const p2 = points[index + 1];
+    const p3 = points[index + 2] ?? p2;
+
+    const cp1x = p1.x + (p2.x - p0.x) / 6;
+    const cp1y = p1.y + (p2.y - p0.y) / 6;
+    const cp2x = p2.x - (p3.x - p1.x) / 6;
+    const cp2y = p2.y - (p3.y - p1.y) / 6;
+
+    commands.push(`C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${p2.x} ${p2.y}`);
+  }
+
+  return commands.join(' ');
+}
+
+function resolveTimelineWindowStart(window: TimelineWindow, now = new Date()): string | null {
+  if (window === 'all') {
+    return null;
+  }
+
+  const start = new Date(now);
+  if (window === '1y') {
+    start.setFullYear(start.getFullYear() - 1);
+  } else if (window === '6m') {
+    start.setMonth(start.getMonth() - 6);
+  } else if (window === '1m') {
+    start.setMonth(start.getMonth() - 1);
+  } else if (window === '1w') {
+    start.setDate(start.getDate() - 7);
+  } else if (window === '1d') {
+    start.setDate(start.getDate() - 1);
+  }
+
+  return start.toISOString().slice(0, 10);
+}
+
+function hashTextToUnit(value: string): number {
+  let hash = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash * 31 + value.charCodeAt(index)) >>> 0;
+  }
+
+  return (hash % 1000) / 1000;
+}
+
+function inferDemoDurationSeconds(entry: TimelineEntryRecord): number {
+  const baseByType: Record<string, number> = {
+    win: 420,
+    blocker: 720,
+    idea: 300,
+    task: 360,
+    learning: 540
+  };
+  const byType = entry.type ? baseByType[entry.type] : undefined;
+  const base = typeof byType === 'number' ? byType : 480;
+  const variation = Math.round(hashTextToUnit(entry.entryId) * 180) - 90;
+  return Math.max(90, base + variation);
+}
+
+function selectSupportedMediaRecorderMimeType(): string | undefined {
+  if (typeof window === 'undefined' || !window.MediaRecorder || typeof window.MediaRecorder.isTypeSupported !== 'function') {
+    return undefined;
+  }
+
+  const candidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus'];
+  for (const candidate of candidates) {
+    if (window.MediaRecorder.isTypeSupported(candidate)) {
+      return candidate;
+    }
+  }
+
+  return undefined;
+}
+
+function mapRecordingStartError(error: unknown): string {
+  const fallback = 'Microphone access failed.';
+
+  if (!(error instanceof Error)) {
+    return fallback;
+  }
+
+  if (error instanceof DOMException) {
+    if (error.name === 'NotAllowedError') {
+      return 'Microphone access was blocked. Allow microphone permissions and try again.';
+    }
+    if (error.name === 'NotFoundError') {
+      return 'No microphone was found on this device.';
+    }
+    if (error.name === 'NotReadableError') {
+      return 'Microphone is already in use by another app.';
+    }
+    if (error.name === 'NotSupportedError') {
+      return 'This browser cannot start audio recording with the selected format.';
+    }
+    if (error.name === 'SecurityError') {
+      return 'Recording requires a secure context (localhost or HTTPS).';
+    }
+  }
+
+  if (error.message.toLowerCase().includes('object can not be found')) {
+    return 'This browser cannot start audio recording with the selected format.';
+  }
+
+  return error.message || fallback;
+}
+
 export function AppPage() {
   const { user, logoutCurrentUser } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
+  const isSettingsPage = location.pathname === '/app/settings';
 
   const [isLoggingOut, setIsLoggingOut] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
@@ -414,6 +540,7 @@ export function AppPage() {
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<BlobPart[]>([]);
+  const recordingMimeTypeRef = useRef<string | null>(null);
   const timerRef = useRef<number | null>(null);
   const startedAtRef = useRef<number | null>(null);
   const uploadSectionRef = useRef<HTMLElement | null>(null);
@@ -438,8 +565,7 @@ export function AppPage() {
   const [onboardingDismissed, setOnboardingDismissed] = useState<boolean>(() => readOnboardingDismissed());
   const [isTimelineLoading, setIsTimelineLoading] = useState(true);
   const [timelineError, setTimelineError] = useState<string | null>(null);
-  const [timelineDateFrom, setTimelineDateFrom] = useState('');
-  const [timelineDateTo, setTimelineDateTo] = useState('');
+  const [timelineWindow, setTimelineWindow] = useState<TimelineWindow>('1m');
   const [timelineTypeFilter, setTimelineTypeFilter] = useState<'all' | string>('all');
   const [timelineContextFilter, setTimelineContextFilter] = useState<'all' | EntryContext>('all');
   const [timelineTagFilterInput, setTimelineTagFilterInput] = useState('');
@@ -476,7 +602,10 @@ export function AppPage() {
   const [askDateTo, setAskDateTo] = useState('');
   const [isAskLoading, setIsAskLoading] = useState(false);
   const [askError, setAskError] = useState<string | null>(null);
-  const [askSources, setAskSources] = useState<SearchResult[]>([]);
+  const [askSources, setAskSources] = useState<AskSource[]>([]);
+  const [askQueryId, setAskQueryId] = useState<string | null>(null);
+  const [askSummarySentences, setAskSummarySentences] = useState<AskSummarySentence[]>([]);
+  const [askSummaryError, setAskSummaryError] = useState<string | null>(null);
   const [askQuestionInput, setAskQuestionInput] = useState('');
   const [isWhatGetsSentModalOpen, setIsWhatGetsSentModalOpen] = useState(false);
   const [askPreviewOptions, setAskPreviewOptions] = useState<AskPreviewOptions>({
@@ -542,10 +671,12 @@ export function AppPage() {
               const existing = next[mapped.entryId];
               next[mapped.entryId] = {
                 ...mapped,
-                type: existing?.type ?? mapped.type,
-                context: existing?.context ?? mapped.context,
-                tags: existing?.tags && existing.tags.length > 0 ? existing.tags : mapped.tags,
-                quote: existing?.quote ?? mapped.quote
+                type: mapped.type ?? existing?.type ?? null,
+                context: mapped.context ?? existing?.context ?? null,
+                tags: mapped.tags.length > 0 ? mapped.tags : existing?.tags ?? [],
+                quote: mapped.quote ?? existing?.quote ?? null,
+                sentimentLabel: mapped.sentimentLabel ?? existing?.sentimentLabel ?? null,
+                sentimentScore: mapped.sentimentScore ?? existing?.sentimentScore ?? null
               };
             }
             writeStoredTimeline(next);
@@ -622,10 +753,13 @@ export function AppPage() {
         title: patch.title ?? existing?.title ?? null,
         createdAt: patch.createdAt ?? existing?.createdAt ?? new Date().toISOString(),
         occurredAt: patch.occurredAt ?? existing?.occurredAt ?? null,
+        durationSeconds: patch.durationSeconds ?? existing?.durationSeconds ?? null,
         type: patch.type ?? existing?.type ?? null,
         context: patch.context ?? existing?.context ?? null,
         tags: patch.tags ?? existing?.tags ?? [],
-        quote: patch.quote ?? existing?.quote ?? null
+        quote: patch.quote ?? existing?.quote ?? null,
+        sentimentLabel: patch.sentimentLabel ?? existing?.sentimentLabel ?? null,
+        sentimentScore: patch.sentimentScore ?? existing?.sentimentScore ?? null
       };
       const updated = { ...previous, [entryId]: next };
       writeStoredTimeline(updated);
@@ -647,8 +781,17 @@ export function AppPage() {
     const detail = await fetchEntryDetail(targetEntryId);
     if (detail.status) {
       setEntryStatus(detail.status);
-      upsertTimelineEntry(targetEntryId, { status: detail.status });
     }
+
+    upsertTimelineEntry(targetEntryId, {
+      status: detail.status,
+      title: detail.title ?? null,
+      type: detail.entryType ? detail.entryType.trim().toLowerCase() : null,
+      context: detail.context === 'work' || detail.context === 'life' ? detail.context : null,
+      tags: Array.from(new Set(detail.tags.map((tag) => tag.trim().toLowerCase()).filter((tag) => tag.length > 0))),
+      sentimentLabel: detail.sentimentLabel ? detail.sentimentLabel.trim().toLowerCase() : null,
+      sentimentScore: detail.sentimentScore
+    });
 
     if (!detail.transcript) {
       return;
@@ -706,15 +849,21 @@ export function AppPage() {
 
     try {
       setRecordingError(null);
+      if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== 'function') {
+        setRecordingError('Microphone APIs are unavailable in this browser.');
+        return;
+      }
+
       const userMediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = userMediaStream;
 
-      const recorder = new MediaRecorder(userMediaStream, {
-        mimeType: 'audio/webm'
-      });
+      const preferredMimeType = selectSupportedMediaRecorderMimeType();
+      const recorder =
+        preferredMimeType !== undefined ? new MediaRecorder(userMediaStream, { mimeType: preferredMimeType }) : new MediaRecorder(userMediaStream);
 
       chunksRef.current = [];
       recorderRef.current = recorder;
+      recordingMimeTypeRef.current = recorder.mimeType || preferredMimeType || null;
       startedAtRef.current = Date.now();
       setElapsedSeconds(0);
       setRecordingBlob(null);
@@ -743,7 +892,8 @@ export function AppPage() {
           streamRef.current = null;
         }
 
-        const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
+        const blobType = recorder.mimeType || recordingMimeTypeRef.current || undefined;
+        const blob = new Blob(chunksRef.current, blobType ? { type: blobType } : undefined);
         setRecordingBlob(blob);
         setRecordingUrl((previousUrl) => {
           if (previousUrl !== null) {
@@ -766,8 +916,7 @@ export function AppPage() {
         setElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
       }, 250);
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Microphone access failed.';
-      setRecordingError(message);
+      setRecordingError(mapRecordingStartError(error));
       setIsRecording(false);
 
       if (streamRef.current !== null) {
@@ -799,44 +948,60 @@ export function AppPage() {
     setIsEditingTranscript(false);
   }
 
-  async function handleAskSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const query = askQueryInput.trim();
-    setSubmittedAskQuery(query);
-    setAskError(null);
-
-    if (!query) {
-      setAskSources([]);
-      return;
-    }
-
+  async function runAskFlow(query: string) {
     setIsAskLoading(true);
+    setAskError(null);
+    setAskSummaryError(null);
     try {
-      const results = await searchEntries(query, SEARCH_RESULT_LIMIT);
-      setAskSources(results);
+      const askQuery = await submitAskQuery(query, SEARCH_RESULT_LIMIT);
+      setAskQueryId(askQuery.queryId);
+      setAskSources(askQuery.sources);
+
+      try {
+        const summary = await summarizeAskQuery(askQuery.queryId);
+        setAskSummarySentences(
+          summary.sentences.slice(0, ASK_SUMMARY_SENTENCE_LIMIT).map((sentence, index) => ({
+            id: `${summary.queryId}-${index}`,
+            text: sentence.text,
+            citationSnippetIds: sentence.snippetIds
+          }))
+        );
+      } catch (error) {
+        setAskSummarySentences([]);
+        setAskSummaryError(error instanceof Error ? error.message : 'Ask summary generation failed.');
+      }
     } catch (error) {
       setAskError(error instanceof Error ? error.message : 'Ask retrieval failed.');
       setAskSources([]);
+      setAskQueryId(null);
+      setAskSummarySentences([]);
     } finally {
       setIsAskLoading(false);
     }
   }
 
+  async function handleAskSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const query = askQueryInput.trim();
+    setSubmittedAskQuery(query);
+
+    if (!query) {
+      setAskSources([]);
+      setAskQueryId(null);
+      setAskSummarySentences([]);
+      setAskError(null);
+      setAskSummaryError(null);
+      return;
+    }
+
+    await runAskFlow(query);
+  }
+
   function applyAskTemplate(templateQuery: string) {
     setAskQueryInput(templateQuery);
     setSubmittedAskQuery(templateQuery);
-    setAskError(null);
     void (async () => {
-      setIsAskLoading(true);
-      try {
-        const results = await searchEntries(templateQuery, SEARCH_RESULT_LIMIT);
-        setAskSources(results);
-      } catch (error) {
-        setAskError(error instanceof Error ? error.message : 'Ask retrieval failed.');
-        setAskSources([]);
-      } finally {
-        setIsAskLoading(false);
-      }
+      await runAskFlow(templateQuery);
     })();
   }
 
@@ -1388,7 +1553,16 @@ export function AppPage() {
   }
 
   const isBusy = pipelineState === 'creating' || pipelineState === 'uploading' || pipelineState === 'transcribing';
-  const currentIndexing = entryId ? indexingByEntry[entryId] : null;
+  const currentTimelineEntry = entryId ? timelineByEntry[entryId] : null;
+  const currentIndexing = entryId
+    ? indexingByEntry[entryId] ?? (currentTimelineEntry?.type && currentTimelineEntry?.context
+      ? {
+          type: currentTimelineEntry.type,
+          context: currentTimelineEntry.context,
+          tags: currentTimelineEntry.tags
+        }
+      : null)
+    : null;
   const retryLabel =
     retryAction === 'retry_upload'
       ? 'Retry upload'
@@ -1408,6 +1582,8 @@ export function AppPage() {
     new Set(timelineEntries.map((entry) => entry.type).filter((value): value is string => Boolean(value)))
   ).sort();
   const allKnownTags = Array.from(new Set(timelineEntries.flatMap((entry) => entry.tags))).sort();
+  const timelineRangeFrom = resolveTimelineWindowStart(timelineWindow);
+  const timelineRangeTo = new Date().toISOString().slice(0, 10);
   const tagFilters = timelineTagFilterInput
     .split(',')
     .map((tag) => tag.trim().toLowerCase())
@@ -1417,10 +1593,10 @@ export function AppPage() {
     const entryDate = entryDateRaw ? new Date(entryDateRaw) : null;
     const entryDay = entryDate && !Number.isNaN(entryDate.getTime()) ? entryDate.toISOString().slice(0, 10) : null;
 
-    if (timelineDateFrom && (!entryDay || entryDay < timelineDateFrom)) {
+    if (timelineRangeFrom && (!entryDay || entryDay < timelineRangeFrom)) {
       return false;
     }
-    if (timelineDateTo && (!entryDay || entryDay > timelineDateTo)) {
+    if (timelineRangeTo && (!entryDay || entryDay > timelineRangeTo)) {
       return false;
     }
     if (timelineTypeFilter !== 'all' && entry.type !== timelineTypeFilter) {
@@ -1436,6 +1612,78 @@ export function AppPage() {
     return true;
   });
   const hasAnyTimelineEntries = timelineEntries.length > 0;
+  const isDemoAccount = typeof user?.email === 'string' && user.email.toLowerCase().includes('demo');
+  const timelineChartEntries = filteredTimelineEntries
+    .map((entry) => {
+      const rawDate = entry.occurredAt ?? entry.createdAt;
+      if (!rawDate) {
+        return null;
+      }
+      const resolvedDuration =
+        typeof entry.durationSeconds === 'number' && Number.isFinite(entry.durationSeconds)
+          ? entry.durationSeconds
+          : isDemoAccount
+            ? inferDemoDurationSeconds(entry)
+            : null;
+      if (resolvedDuration === null) {
+        return null;
+      }
+
+      const ts = Date.parse(rawDate);
+      if (!Number.isFinite(ts)) {
+        return null;
+      }
+
+      return {
+        entryId: entry.entryId,
+        title: entry.title ?? 'Untitled entry',
+        timestamp: ts,
+        durationSeconds: Math.max(0, resolvedDuration)
+      };
+    })
+    .filter(
+      (
+        entry
+      ): entry is {
+        entryId: string;
+        title: string;
+        timestamp: number;
+        durationSeconds: number;
+      } => Boolean(entry)
+    )
+    .sort((left, right) => left.timestamp - right.timestamp);
+  const chartWidth = 980;
+  const chartHeight = 360;
+  const chartPadding = { top: 24, right: 28, bottom: 54, left: 64 };
+  const maxDurationSeconds = Math.max(60, ...timelineChartEntries.map((entry) => entry.durationSeconds));
+  const minTimelineTs = timelineChartEntries[0]?.timestamp ?? 0;
+  const maxTimelineTs = timelineChartEntries[timelineChartEntries.length - 1]?.timestamp ?? minTimelineTs;
+  const yTicks = [0, 1, 2, 3, 4].map((tick) => Math.round((maxDurationSeconds * tick) / 4));
+  const xTickCount = Math.min(5, timelineChartEntries.length);
+  const xTickIndexes = xTickCount <= 1
+    ? [0]
+    : Array.from({ length: xTickCount }, (_, index) =>
+        Math.round((index * (timelineChartEntries.length - 1)) / (xTickCount - 1))
+      );
+  const chartPoints = timelineChartEntries.map((entry, index) => {
+    const dateRange = Math.max(1, maxTimelineTs - minTimelineTs);
+    const x =
+      timelineChartEntries.length === 1
+        ? (chartWidth - chartPadding.left - chartPadding.right) / 2 + chartPadding.left
+        : chartPadding.left + ((entry.timestamp - minTimelineTs) / dateRange) * (chartWidth - chartPadding.left - chartPadding.right);
+    const y =
+      chartHeight -
+      chartPadding.bottom -
+      (entry.durationSeconds / maxDurationSeconds) * (chartHeight - chartPadding.top - chartPadding.bottom);
+    return {
+      ...entry,
+      index,
+      x,
+      y,
+      dateLabel: new Date(entry.timestamp).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+    };
+  });
+  const chartPath = buildSplinePath(chartPoints.map((point) => ({ x: point.x, y: point.y })));
   const latestTimelineEntryId = entryId ?? timelineEntries[0]?.entryId ?? null;
   const hasReadyTimelineEntry = timelineEntries.some((entry) => READY_STATUSES.has(normalizeStatus(entry.status)));
   const hasIndexedTimelineEntry = timelineEntries.some(
@@ -1532,12 +1780,12 @@ export function AppPage() {
   );
   const askSourcesForPreview = useMemo(() => {
     return filteredAskSources
-      .map((result, index) => {
+      .map((result) => {
         const timelineEntry = timelineByEntry[result.entryId];
         const occurredAt = normalizeIsoDate(timelineEntry?.occurredAt ?? timelineEntry?.createdAt ?? null);
         return {
           result,
-          snippetId: `${result.entryId}:${result.startChar}:${result.endChar}:${index}`,
+          snippetId: result.snippetId,
           occurredAt,
           isSensitive: isSensitiveTimelineEntry(timelineEntry)
         };
@@ -1557,6 +1805,7 @@ export function AppPage() {
   const askPreviewPayload = useMemo(() => {
     const query = askQuestionInput.trim() || submittedAskQuery || submittedSearchQuery;
     return {
+      query_id: askQueryId,
       query,
       date_range: {
         from: askDateFrom || null,
@@ -1570,18 +1819,18 @@ export function AppPage() {
       snippet_count: askSourcesForPreview.length,
       snippets: askSourcesForPreview
     };
-  }, [askDateFrom, askDateTo, askPreviewOptions, askQuestionInput, askSourcesForPreview, submittedAskQuery, submittedSearchQuery]);
+  }, [askDateFrom, askDateTo, askPreviewOptions, askQueryId, askQuestionInput, askSourcesForPreview, submittedAskQuery, submittedSearchQuery]);
   const askPreviewPayloadJson = useMemo(() => JSON.stringify(askPreviewPayload, null, 2), [askPreviewPayload]);
   const askSummaryCitations = useMemo<AskSummaryCitation[]>(
     () =>
-      filteredAskSources.map((source, index) => ({
-        snippetId: `${source.entryId}:${source.startChar}:${source.endChar}:${index}`,
+      askSources.map((source) => ({
+        snippetId: source.snippetId,
         entryId: source.entryId,
         startChar: source.startChar,
         endChar: source.endChar,
         snippetText: source.snippetText
       })),
-    [filteredAskSources]
+    [askSources]
   );
   const askSummaryCitationsBySnippetId = useMemo<Record<string, AskSummaryCitation>>(
     () =>
@@ -1590,10 +1839,6 @@ export function AppPage() {
         return accumulator;
       }, {}),
     [askSummaryCitations]
-  );
-  const askSummarySentences = useMemo(
-    () => buildAskSummarySentences(askQuestionInput || submittedAskQuery, askSummaryCitations),
-    [askQuestionInput, askSummaryCitations, submittedAskQuery]
   );
   const bragExportStatusLabel = bragExportJob?.status ?? null;
   const isBragExportReady = BRAG_EXPORT_READY_STATUSES.has((bragExportJob?.status ?? '').trim().toLowerCase());
@@ -1619,36 +1864,85 @@ export function AppPage() {
   }
 
   return (
-    <main className="min-h-screen bg-gradient-to-br from-sky-50 via-cyan-50 to-emerald-100 p-6">
-      <section className="mx-auto mt-12 w-full max-w-2xl rounded-lg border bg-card p-8 text-card-foreground shadow-sm">
-        <div className="flex flex-wrap items-start justify-between gap-3">
+    <main className="min-h-screen mono-page">
+      <section className="mono-shell">
+        <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
-            <h1 className="text-2xl font-semibold tracking-tight">VoiceVault App</h1>
-            <p className="mt-2 text-sm text-muted-foreground">Authenticated session is active.</p>
+            <p className="mono-kicker">Personal Voice Archive</p>
+            <h1 className="mt-2 font-display text-6xl leading-none tracking-[-0.05em] md:text-8xl lg:text-9xl">
+              {isSettingsPage ? 'SETTINGS' : 'VAULT'}
+            </h1>
+            <p className="mt-5 max-w-3xl text-lg leading-relaxed text-muted-foreground">
+              {isSettingsPage
+                ? 'Manage exports, privacy controls, and secondary workspace tools.'
+                : 'Authenticated session is active. Capture, classify, and retrieve evidence-backed transcripts.'}
+            </p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 self-start">
             {!shouldShowOnboardingCard && onboardingCompletedCount < onboardingSteps.length ? (
               <Button variant="outline" size="sm" onClick={() => setOnboardingDismissed(false)}>
                 Show setup guide
               </Button>
             ) : null}
-            <Button variant="outline" size="sm" onClick={() => navigate('/app/audit')}>
-              Open audit log
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                navigate(isSettingsPage ? '/app' : '/app/settings');
+              }}
+              aria-label={isSettingsPage ? 'Go to home view' : 'Open settings'}
+              title={isSettingsPage ? 'Home' : 'Settings'}
+            >
+              {isSettingsPage ? (
+                'Back to home'
+              ) : (
+                <>
+                  <svg aria-hidden="true" className="mr-2 h-4 w-4" viewBox="0 0 24 24" fill="none">
+                    <path
+                      d="M10.3 2.9H13.7L14.2 5.1C14.7 5.3 15.2 5.5 15.6 5.8L17.7 4.8L20.1 7.2L19.1 9.3C19.4 9.7 19.6 10.2 19.8 10.7L22 11.2V14.6L19.8 15.1C19.6 15.6 19.4 16.1 19.1 16.5L20.1 18.6L17.7 21L15.6 20C15.2 20.3 14.7 20.5 14.2 20.7L13.7 22.9H10.3L9.8 20.7C9.3 20.5 8.8 20.3 8.4 20L6.3 21L3.9 18.6L4.9 16.5C4.6 16.1 4.4 15.6 4.2 15.1L2 14.6V11.2L4.2 10.7C4.4 10.2 4.6 9.7 4.9 9.3L3.9 7.2L6.3 4.8L8.4 5.8C8.8 5.5 9.3 5.3 9.8 5.1L10.3 2.9Z"
+                      stroke="currentColor"
+                      strokeWidth="1.5"
+                    />
+                    <circle cx="12" cy="12.9" r="3.2" stroke="currentColor" strokeWidth="1.5" />
+                  </svg>
+                  Settings
+                </>
+              )}
             </Button>
           </div>
         </div>
-        <dl className="mt-6 rounded-md border bg-background p-4 text-sm">
-          <div className="flex justify-between gap-3">
-            <dt className="text-muted-foreground">Email</dt>
+        {isSettingsPage ? (
+          <>
+            <dl className="mt-8 border border-foreground bg-background p-4 text-sm">
+          <div className="flex flex-wrap justify-between gap-3">
+            <dt className="mono-kicker">Email</dt>
             <dd className="font-medium">{typeof user?.email === 'string' ? user.email : 'Unknown'}</dd>
           </div>
-        </dl>
-        {shouldShowOnboardingCard ? (
-          <section className="mt-6 rounded-md border border-emerald-200 bg-gradient-to-r from-emerald-50 via-cyan-50 to-sky-50 p-4">
+            </dl>
+            <section className="mono-invert relative mt-8 grid gap-4 p-6 md:grid-cols-3 md:p-8">
+          <article className="relative z-10 border border-background p-4">
+            <p className="mono-kicker text-background/80">Onboarding</p>
+            <p className="mt-2 font-display text-5xl leading-none">{onboardingCompletedCount}</p>
+            <p className="mt-2 text-xs uppercase tracking-[0.1em] text-background/80">steps complete</p>
+          </article>
+          <article className="relative z-10 border border-background p-4">
+            <p className="mono-kicker text-background/80">Timeline</p>
+            <p className="mt-2 font-display text-5xl leading-none">{timelineEntries.length}</p>
+            <p className="mt-2 text-xs uppercase tracking-[0.1em] text-background/80">entries indexed</p>
+          </article>
+          <article className="relative z-10 border border-background p-4">
+            <p className="mono-kicker text-background/80">Pipeline</p>
+            <p className="mt-2 font-display text-5xl leading-none">{pipelineState.toUpperCase()}</p>
+            <p className="mt-2 text-xs uppercase tracking-[0.1em] text-background/80">current state</p>
+          </article>
+            </section>
+            <div className="mono-rule" />
+            {shouldShowOnboardingCard ? (
+              <section className="mono-section mt-6 bg-muted">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
-                <h2 className="text-base font-semibold">Guided setup</h2>
-                <p className="mt-1 text-sm text-slate-700">
+                <h2 className="text-4xl font-semibold leading-none tracking-tight">Guided setup</h2>
+                <p className="mt-1 text-sm text-muted-foreground">
                   {onboardingCompletedCount} of {onboardingSteps.length} steps complete.
                 </p>
               </div>
@@ -1660,7 +1954,7 @@ export function AppPage() {
               {onboardingSteps.map((step, index) => (
                 <div
                   key={step.key}
-                  className={`rounded-md border px-3 py-2 text-sm ${step.done ? 'border-emerald-200 bg-emerald-100/60' : 'border-slate-200 bg-white/80'}`}
+                  className={`border border-foreground px-3 py-3 text-sm ${step.done ? 'bg-foreground text-background' : 'bg-background'}`}
                 >
                   <p className="font-medium">
                     {index + 1}. {step.label} {step.done ? 'Complete' : 'Pending'}
@@ -1697,106 +1991,488 @@ export function AppPage() {
               <Button
                 size="sm"
                 variant="outline"
-                onClick={() => scrollToSection(askSectionRef, 'input[type=\"search\"]')}
+                onClick={() => navigate('/app')}
                 disabled={hasKnowledgeAttempt}
               >
                 Ask or search
               </Button>
-              <Button size="sm" variant="outline" onClick={() => scrollToSection(timelineSectionRef)}>
+              <Button size="sm" variant="outline" onClick={() => navigate('/app')}>
                 Review timeline
               </Button>
             </div>
-          </section>
-        ) : null}
-        <section className="mt-6 rounded-md border bg-background p-4">
-          <h2 className="text-base font-semibold">Record audio</h2>
-          <p className="mt-1 text-sm text-muted-foreground">Capture a voice note as a WebM audio blob.</p>
-
-          <p className="mt-4 text-sm font-medium">
-            Status:{' '}
-            <span className={isRecording ? 'text-red-600' : 'text-muted-foreground'}>
-              {isRecording ? 'Recording' : 'Idle'}
-            </span>
-          </p>
-          <p className="text-sm text-muted-foreground">Timer: {formatDuration(elapsedSeconds)}</p>
-
-          <div className="mt-4 flex flex-wrap gap-3">
-            <Button onClick={handleStartRecording} disabled={isRecording}>
-              Start recording
-            </Button>
-            <Button onClick={handleStopRecording} disabled={!isRecording} variant="outline">
-              Stop recording
-            </Button>
-          </div>
-
-          {recordingError !== null ? (
-            <p className="mt-3 text-sm text-destructive" role="alert">
-              {recordingError}
-            </p>
-          ) : null}
-
-          {recordingUrl !== null ? (
-            <div className="mt-4 space-y-2">
-              <audio controls className="w-full" src={recordingUrl} />
-              <p className="text-xs text-muted-foreground">
-                Blob type: {recordingBlob?.type ?? 'audio/webm'} | Size: {recordingBlob?.size ?? 0} bytes
-              </p>
-            </div>
-          ) : null}
-        </section>
-        <section ref={uploadSectionRef} className="mt-6 space-y-4 rounded-md border bg-background p-4">
-          <h2 className="text-base font-semibold">Audio Upload Pipeline</h2>
-          <p className="text-sm text-muted-foreground">Create entry, upload audio, then poll for transcription status.</p>
-          <input
-            type="file"
-            accept="audio/*"
-            onChange={handleAudioSelection}
-            className="block w-full text-sm file:mr-3 file:rounded-md file:border file:border-input file:bg-background file:px-3 file:py-2 file:text-sm"
-          />
-          <div className="flex items-center gap-3">
-            <Button onClick={() => void handleStartUpload()} disabled={!selectedFile || isBusy}>
-              {pipelineState === 'creating' && 'Creating entry...'}
-              {pipelineState === 'uploading' && 'Uploading audio...'}
-              {pipelineState === 'transcribing' && 'Polling status...'}
-              {(pipelineState === 'idle' || pipelineState === 'ready' || pipelineState === 'error') &&
-                'Start upload pipeline'}
-            </Button>
-            {retryLabel ? (
-              <Button onClick={handleRetry} disabled={isBusy} variant="outline">
-                {retryLabel}
-              </Button>
+              </section>
             ) : null}
-            <span className="text-sm text-muted-foreground">
-              State: <span className="font-medium text-foreground">{pipelineState}</span>
+          </>
+        ) : null}
+        {!isSettingsPage ? (
+          <>
+            <section className="mt-6 grid gap-6 lg:min-h-[60vh] lg:grid-cols-2">
+          <article className="mono-section flex flex-col gap-6">
+            <div className="flex items-center gap-6">
+              <button
+                type="button"
+                onClick={isRecording ? handleStopRecording : handleStartRecording}
+                className={`flex h-36 w-36 items-center justify-center rounded-full border-2 border-foreground transition-none focus-visible:outline focus-visible:outline-3 focus-visible:outline-foreground focus-visible:outline-offset-3 md:h-44 md:w-44 ${
+                  isRecording ? 'bg-background text-foreground' : 'bg-foreground text-background'
+                }`}
+                aria-label={isRecording ? 'Stop recording' : 'Start recording'}
+                title={isRecording ? 'Stop recording' : 'Start recording'}
+              >
+                <svg
+                  aria-hidden="true"
+                  className="h-16 w-16 md:h-20 md:w-20"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  xmlns="http://www.w3.org/2000/svg"
+                >
+                  <rect x="9" y="3" width="6" height="11" rx="3" stroke="currentColor" strokeWidth="1.8" />
+                  <path d="M6.5 10.5V11.5C6.5 14.5376 8.96243 17 12 17C15.0376 17 17.5 14.5376 17.5 11.5V10.5" stroke="currentColor" strokeWidth="1.8" />
+                  <path d="M12 17V21" stroke="currentColor" strokeWidth="1.8" />
+                  <path d="M9 21H15" stroke="currentColor" strokeWidth="1.8" />
+                </svg>
+              </button>
+              <div>
+                <p className="mono-kicker">Record</p>
+                <h2 className="text-4xl font-semibold leading-none tracking-tight">Capture</h2>
+              </div>
+            </div>
+
+            <div className="space-y-4 border-t-2 border-foreground pt-4">
+              <p className="text-sm font-medium">
+                Status:{' '}
+                <span className={isRecording ? 'text-foreground' : 'text-muted-foreground'}>
+                  {isRecording ? 'Recording' : 'Idle'}
+                </span>
+              </p>
+              <p className="text-sm text-muted-foreground">Timer: {formatDuration(elapsedSeconds)}</p>
+              <p className="text-xs uppercase tracking-[0.1em] text-muted-foreground">
+                Press the mic to {isRecording ? 'stop' : 'start'} recording.
+              </p>
+              {recordingError !== null ? (
+                <p className="text-sm text-foreground" role="alert">
+                  {recordingError}
+                </p>
+              ) : null}
+              {recordingUrl !== null ? (
+                <div className="space-y-2">
+                  <audio controls className="w-full" src={recordingUrl} />
+                </div>
+              ) : null}
+            </div>
+          </article>
+
+          <article ref={askSectionRef} className="mono-section space-y-6">
+            <div className="flex items-center justify-between gap-3 border-b-2 border-foreground pb-3">
+              <div>
+                <p className="mono-kicker">Ask</p>
+                <h2 className="text-4xl font-semibold leading-none tracking-tight">Query</h2>
+              </div>
+              <span className="text-xs uppercase tracking-[0.1em] text-muted-foreground">Sources-first</span>
+            </div>
+
+            <div className="space-y-4">
+              <form onSubmit={handleAskSubmit} className="flex flex-col gap-3 sm:flex-row">
+                <input
+                  type="search"
+                  value={askQueryInput}
+                  onChange={(event) => setAskQueryInput(event.target.value)}
+                  placeholder="Ask from your transcripts..."
+                  className="h-10 w-full rounded-none border bg-background px-3 text-sm"
+                />
+                <Button type="submit" disabled={isAskLoading} className="sm:w-auto">
+                  {isAskLoading ? 'Finding sources...' : 'Find sources'}
+                </Button>
+              </form>
+              <div className="flex flex-wrap gap-2">
+                {ASK_TEMPLATES.map((template) => (
+                  <Button
+                    key={template.label}
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => applyAskTemplate(template.query)}
+                    disabled={isAskLoading}
+                  >
+                    {template.label}
+                  </Button>
+                ))}
+              </div>
+              <div className="grid gap-3 md:grid-cols-2">
+                <label className="space-y-1 text-sm">
+                  <span className="font-medium">Date from</span>
+                  <input
+                    type="date"
+                    value={askDateFrom}
+                    onChange={(event) => setAskDateFrom(event.target.value)}
+                    className="w-full rounded-none border bg-background px-3 py-2 text-sm"
+                  />
+                </label>
+                <label className="space-y-1 text-sm">
+                  <span className="font-medium">Date to</span>
+                  <input
+                    type="date"
+                    value={askDateTo}
+                    onChange={(event) => setAskDateTo(event.target.value)}
+                    className="w-full rounded-none border bg-background px-3 py-2 text-sm"
+                  />
+                </label>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    setAskDateFrom('');
+                    setAskDateTo('');
+                  }}
+                >
+                  Clear range
+                </Button>
+              </div>
+              {askError ? <p className="text-sm text-foreground">{askError}</p> : null}
+              {askSummaryError ? <p className="text-sm text-foreground">{askSummaryError}</p> : null}
+              {isAskLoading ? <p className="text-sm text-muted-foreground">Loading sources...</p> : null}
+              {filteredAskSources.length > 0 ? (
+                <div className="space-y-3">
+                  {filteredAskSources.map((source) => {
+                    const sourceDate = timelineByEntry[source.entryId]?.occurredAt ?? timelineByEntry[source.entryId]?.createdAt;
+                    const citation: AskSummaryCitation = {
+                      snippetId: source.snippetId,
+                      entryId: source.entryId,
+                      startChar: source.startChar,
+                      endChar: source.endChar,
+                      snippetText: source.snippetText
+                    };
+                    return (
+                      <article key={source.snippetId} className="border border-foreground p-3">
+                        <p className="text-xs text-muted-foreground">
+                          Entry: {source.entryId}
+                          {sourceDate ? ` | ${formatTimelineDate(sourceDate)}` : ''}
+                        </p>
+                        <p className="mt-2 text-sm">{source.snippetText}</p>
+                        <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+                          <p className="text-xs text-muted-foreground">
+                            Source offsets: {source.startChar}-{source.endChar}
+                          </p>
+                          <Button size="sm" variant="outline" onClick={() => openAskCitation(citation)}>
+                            Open source
+                          </Button>
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
+              ) : null}
+              <div className="border border-foreground bg-muted/20 p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h3 className="text-sm font-semibold">Summary</h3>
+                  <span className="text-xs text-muted-foreground">Per-sentence citations</span>
+                </div>
+                <p className="mt-1 text-xs text-muted-foreground">Every summary sentence includes clickable evidence that jumps to transcript highlights.</p>
+                <div className="mt-3">
+                  <AskSummaryRenderer
+                    sentences={askSummarySentences}
+                    citationsBySnippetId={askSummaryCitationsBySnippetId}
+                    onOpenCitation={openAskCitation}
+                  />
+                </div>
+              </div>
+              {hasAskAttempt && !isAskLoading && !askError && filteredAskSources.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No sources found for "{submittedAskQuery}" in the selected range.</p>
+              ) : null}
+            </div>
+
+            <div className="space-y-4 border-t-2 border-foreground pt-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <h3 className="text-2xl font-semibold leading-none tracking-tight">Search</h3>
+                <span className="text-xs text-muted-foreground">Transcript search with highlight jump</span>
+              </div>
+              <form onSubmit={handleSearchSubmit} className="flex flex-col gap-3 sm:flex-row">
+                <input
+                  type="search"
+                  value={searchQueryInput}
+                  onChange={(event) => setSearchQueryInput(event.target.value)}
+                  placeholder="Search transcripts..."
+                  className="h-10 w-full rounded-none border bg-background px-3 text-sm"
+                />
+                <Button type="submit" disabled={isSearchLoading} className="sm:w-auto">
+                  {isSearchLoading ? 'Searching...' : 'Search'}
+                </Button>
+              </form>
+              {searchError ? <p className="text-sm text-foreground">{searchError}</p> : null}
+              {isSearchLoading ? <p className="text-sm text-muted-foreground">Loading results...</p> : null}
+              {searchResults.length > 0 ? (
+                <div className="space-y-3">
+                  {searchResults.map((result, index) => (
+                    <article key={`${result.entryId}-${result.startChar}-${result.endChar}-${index}`} className="border border-foreground p-3">
+                      <p className="text-xs text-muted-foreground">Entry: {result.entryId}</p>
+                      <p className="mt-2 text-sm">{result.snippetText}</p>
+                      <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+                        <p className="text-xs text-muted-foreground">
+                          Offsets: {result.startChar}-{result.endChar}
+                        </p>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => {
+                            const params = new URLSearchParams({
+                              start: String(result.startChar),
+                              end: String(result.endChar)
+                            });
+                            if (submittedSearchQuery) {
+                              params.set('q', submittedSearchQuery);
+                            }
+                            navigate(`/app/entries/${result.entryId}?${params.toString()}`);
+                          }}
+                        >
+                          Open result
+                        </Button>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              ) : null}
+              {hasSearchAttempt && !isSearchLoading && !searchError && searchResults.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No matches found for "{submittedSearchQuery}".</p>
+              ) : null}
+            </div>
+          </article>
+            </section>
+
+            <div className="mono-rule" />
+
+            <section ref={timelineSectionRef} className="mono-section mt-6 space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h2 className="text-base font-semibold">Timeline</h2>
+            <span className="text-xs text-muted-foreground">
+              Showing {filteredTimelineEntries.length} of {timelineEntries.length}
             </span>
           </div>
-          {entryId ? (
-            <div className="flex flex-wrap items-center gap-3">
-              <p className="text-sm">
-                Entry ID: <span className="font-mono">{entryId}</span>
-              </p>
-              <Button onClick={() => navigate(`/app/entries/${entryId}`)} size="sm" variant="outline">
-                Open entry detail
-              </Button>
+          <p className="text-sm text-muted-foreground">Filter by date range, type, context, and tags.</p>
+          <div className="space-y-2">
+            <p className="font-medium text-sm">Range</p>
+            <div className="flex flex-wrap gap-2">
+              {TIMELINE_WINDOW_OPTIONS.map((option) => (
+                <button
+                  key={option}
+                  type="button"
+                  onClick={() => setTimelineWindow(option)}
+                  className={`min-h-10 border-2 px-3 py-2 text-xs uppercase tracking-[0.1em] transition-none focus-visible:outline focus-visible:outline-3 focus-visible:outline-foreground focus-visible:outline-offset-2 ${
+                    timelineWindow === option ? 'border-foreground bg-foreground text-background' : 'border-foreground bg-background text-foreground'
+                  }`}
+                >
+                  {option}
+                </button>
+              ))}
             </div>
-          ) : null}
-          {entryStatus ? (
-            <p className="text-sm">
-              Entry status: <span className="font-medium">{entryStatus}</span>
+            <p className="text-xs text-muted-foreground">
+              {timelineWindow === 'all' ? 'Showing all dates.' : `Showing ${timelineRangeFrom} to ${timelineRangeTo}.`}
             </p>
-          ) : null}
-          {errorMessage ? <p className="text-sm text-destructive">{errorMessage}</p> : null}
-        </section>
-        <section ref={askSectionRef} className="mt-6 space-y-4 rounded-md border bg-background p-4">
+          </div>
+          <div className="grid gap-3 md:grid-cols-2">
+            <label className="space-y-1 text-sm">
+              <span className="font-medium">Type</span>
+              <select
+                value={timelineTypeFilter}
+                onChange={(event) => setTimelineTypeFilter(event.target.value)}
+                className="w-full rounded-none border bg-background px-3 py-2 text-sm capitalize"
+              >
+                <option value="all">All types</option>
+                {typeFilterOptions.map((option) => (
+                  <option key={option} value={option} className="capitalize">
+                    {option}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="space-y-1 text-sm">
+              <span className="font-medium">Context</span>
+              <select
+                value={timelineContextFilter}
+                onChange={(event) => setTimelineContextFilter(event.target.value as 'all' | EntryContext)}
+                className="w-full rounded-none border bg-background px-3 py-2 text-sm capitalize"
+              >
+                <option value="all">All contexts</option>
+                <option value="work">Work</option>
+                <option value="life">Life</option>
+              </select>
+            </label>
+          </div>
+          <label className="space-y-1 text-sm">
+            <span className="font-medium">Tags (comma-separated)</span>
+            <input
+              type="text"
+              value={timelineTagFilterInput}
+              onChange={(event) => setTimelineTagFilterInput(event.target.value)}
+              placeholder="e.g. project-x, retro"
+              className="w-full rounded-none border bg-background px-3 py-2 text-sm"
+            />
+            {allKnownTags.length > 0 ? (
+              <span className="block text-xs text-muted-foreground">Known tags: {allKnownTags.map((tag) => `#${tag}`).join(', ')}</span>
+            ) : null}
+          </label>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                setTimelineWindow('1m');
+                setTimelineTypeFilter('all');
+                setTimelineContextFilter('all');
+                setTimelineTagFilterInput('');
+              }}
+            >
+              Clear filters
+            </Button>
+          </div>
+          {isTimelineLoading ? <p className="text-sm text-muted-foreground">Loading timeline...</p> : null}
+          {timelineError ? <p className="text-sm text-foreground">{timelineError}</p> : null}
+          {timelineChartEntries.length > 0 ? (
+            <div className="border border-foreground bg-background p-4">
+              <svg viewBox={`0 0 ${chartWidth} ${chartHeight}`} className="h-[22rem] w-full" role="img" aria-label="Recording duration over time">
+                {yTicks.map((tick) => {
+                  const y =
+                    chartHeight -
+                    chartPadding.bottom -
+                    (tick / maxDurationSeconds) * (chartHeight - chartPadding.top - chartPadding.bottom);
+                  return (
+                    <g key={`y-${tick}`}>
+                      <line
+                        x1={chartPadding.left}
+                        y1={y}
+                        x2={chartWidth - chartPadding.right}
+                        y2={y}
+                        stroke="currentColor"
+                        strokeOpacity="0.18"
+                        strokeWidth="1"
+                      />
+                      <text x={chartPadding.left - 10} y={y + 4} textAnchor="end" className="fill-current text-[11px]">
+                        {formatDurationMinutes(tick)}
+                      </text>
+                    </g>
+                  );
+                })}
+
+                {xTickIndexes.map((index) => {
+                  const point = chartPoints[index];
+                  if (!point) {
+                    return null;
+                  }
+                  return (
+                    <g key={`x-${point.entryId}`}>
+                      <line
+                        x1={point.x}
+                        y1={chartPadding.top}
+                        x2={point.x}
+                        y2={chartHeight - chartPadding.bottom}
+                        stroke="currentColor"
+                        strokeOpacity="0.12"
+                        strokeWidth="1"
+                      />
+                      <text x={point.x} y={chartHeight - 14} textAnchor="middle" className="fill-current text-[11px]">
+                        {point.dateLabel}
+                      </text>
+                    </g>
+                  );
+                })}
+
+                <line
+                  x1={chartPadding.left}
+                  y1={chartHeight - chartPadding.bottom}
+                  x2={chartWidth - chartPadding.right}
+                  y2={chartHeight - chartPadding.bottom}
+                  stroke="currentColor"
+                  strokeWidth="2"
+                />
+                <line
+                  x1={chartPadding.left}
+                  y1={chartPadding.top}
+                  x2={chartPadding.left}
+                  y2={chartHeight - chartPadding.bottom}
+                  stroke="currentColor"
+                  strokeWidth="2"
+                />
+
+                {chartPath ? <path d={chartPath} fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" /> : null}
+
+                {chartPoints.map((point) => (
+                  <g
+                    key={point.entryId}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => navigate(`/app/entries/${point.entryId}`)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        navigate(`/app/entries/${point.entryId}`);
+                      }
+                    }}
+                    className="cursor-pointer"
+                    aria-label={`Open entry ${point.title} on ${point.dateLabel}, duration ${formatDurationMinutes(point.durationSeconds)}`}
+                  >
+                    <title>{`${point.title} • ${point.dateLabel} • ${formatDurationMinutes(point.durationSeconds)}`}</title>
+                    <circle cx={point.x} cy={point.y} r="5" fill="white" stroke="currentColor" strokeWidth="2" />
+                  </g>
+                ))}
+
+                <text x={(chartPadding.left + chartWidth - chartPadding.right) / 2} y={chartHeight - 2} textAnchor="middle" className="fill-current text-[12px]">
+                  Date
+                </text>
+                <text
+                  x={14}
+                  y={(chartPadding.top + chartHeight - chartPadding.bottom) / 2}
+                  textAnchor="middle"
+                  className="fill-current text-[12px]"
+                  transform={`rotate(-90 14 ${(chartPadding.top + chartHeight - chartPadding.bottom) / 2})`}
+                >
+                  Duration
+                </text>
+              </svg>
+              <p className="mt-3 text-xs text-muted-foreground">Smooth spline with circular markers. Click a marker to open that entry detail.</p>
+            </div>
+          ) : filteredTimelineEntries.length > 0 ? (
+            <p className="text-sm text-muted-foreground">No recording durations are available for the selected filters yet.</p>
+          ) : hasAnyTimelineEntries ? (
+            <p className="text-sm text-muted-foreground">No entries match the selected filters yet.</p>
+          ) : (
+            <div className="rounded-none border border-dashed p-4">
+              <p className="text-sm font-medium">No entries yet.</p>
+              <p className="mt-1 text-sm text-muted-foreground">
+                Upload your first note to start transcription, quick indexing, and source-backed retrieval.
+              </p>
+              <div className="mt-3">
+                <Button size="sm" onClick={() => scrollToSection(uploadSectionRef, 'input[type=\"file\"]')}>
+                  Upload first note
+                </Button>
+              </div>
+            </div>
+          )}
+            </section>
+          </>
+        ) : null}
+
+        {isSettingsPage ? (
+          <>
+            <div className="mono-section mt-6 flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="mono-kicker">Audit</p>
+            <h2 className="text-3xl font-semibold leading-none tracking-tight">Review Activity Log</h2>
+          </div>
+          <Button variant="outline" onClick={() => navigate('/app/audit')}>
+            Open audit log
+          </Button>
+            </div>
+
+        <section className="mono-section mt-6 space-y-4">
           <div className="flex flex-wrap items-center gap-2">
             <h2 className="text-base font-semibold">Transcript</h2>
             {transcriptVersion !== null ? (
-              <span className="rounded-full bg-secondary px-2 py-1 text-xs font-medium text-secondary-foreground">
+              <span className="rounded-none bg-secondary px-2 py-1 text-xs font-medium text-secondary-foreground">
                 Version {transcriptVersion}
               </span>
             ) : null}
             {isTranscriptEdited ? (
-              <span className="rounded-full bg-emerald-100 px-2 py-1 text-xs font-medium text-emerald-800">Edited</span>
+              <span className="rounded-none bg-muted px-2 py-1 text-xs font-medium text-foreground">Edited</span>
             ) : null}
           </div>
 
@@ -1804,7 +2480,7 @@ export function AppPage() {
             isEditingTranscript ? (
               <div className="space-y-3">
                 <textarea
-                  className="min-h-44 w-full rounded-md border bg-background p-3 text-sm"
+                  className="min-h-44 w-full rounded-none border bg-background p-3 text-sm"
                   value={transcriptDraft}
                   onChange={(event) => setTranscriptDraft(event.target.value)}
                   disabled={isSavingTranscript}
@@ -1830,12 +2506,16 @@ export function AppPage() {
             <p className="text-sm text-muted-foreground">Transcript will appear after processing is complete.</p>
           )}
 
-          {transcriptNotice ? <p className="text-sm text-emerald-700">{transcriptNotice}</p> : null}
-          {transcriptError ? <p className="text-sm text-destructive">{transcriptError}</p> : null}
+          {transcriptNotice ? <p className="text-sm text-foreground">{transcriptNotice}</p> : null}
+          {transcriptError ? <p className="text-sm text-foreground">{transcriptError}</p> : null}
         </section>
-        <section ref={timelineSectionRef} className="mt-6 space-y-4 rounded-md border bg-background p-4">
+
+        <section ref={uploadSectionRef} className="mono-section mt-6 space-y-5">
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <h2 className="text-base font-semibold">Quick Indexing</h2>
+            <div>
+              <p className="mono-kicker">Capture Setup</p>
+              <h2 className="text-3xl font-semibold leading-none tracking-tight">Upload + Indexing</h2>
+            </div>
             <Button
               onClick={() => {
                 if (entryId) {
@@ -1848,9 +2528,47 @@ export function AppPage() {
               {currentIndexing ? 'Edit indexing' : 'Index this entry'}
             </Button>
           </div>
-          <p className="text-sm text-muted-foreground">Type, context, and tags to classify this entry in about 5 seconds.</p>
+          <p className="text-sm text-muted-foreground">Create entry, upload audio, then classify it.</p>
+          <input
+            type="file"
+            accept="audio/*"
+            onChange={handleAudioSelection}
+            className="block w-full text-sm file:mr-3 file:rounded-none file:border file:border-input file:bg-background file:px-3 file:py-2 file:text-sm"
+          />
+          <div className="flex flex-wrap items-center gap-3">
+            <Button onClick={() => void handleStartUpload()} disabled={!selectedFile || isBusy}>
+              {pipelineState === 'creating' && 'Creating entry...'}
+              {pipelineState === 'uploading' && 'Uploading audio...'}
+              {pipelineState === 'transcribing' && 'Polling status...'}
+              {(pipelineState === 'idle' || pipelineState === 'ready' || pipelineState === 'error') &&
+                'Start upload pipeline'}
+            </Button>
+            {retryLabel ? (
+              <Button onClick={handleRetry} disabled={isBusy} variant="outline">
+                {retryLabel}
+              </Button>
+            ) : null}
+          </div>
+          <p className="text-sm text-muted-foreground">
+            State: <span className="font-medium text-foreground">{pipelineState}</span>
+          </p>
+          {entryId ? (
+            <div className="flex flex-wrap items-center gap-3">
+              <p className="text-sm">
+                Entry ID: <span className="font-mono">{entryId}</span>
+              </p>
+              <Button onClick={() => navigate(`/app/entries/${entryId}`)} size="sm" variant="outline">
+                Open entry detail
+              </Button>
+            </div>
+          ) : null}
+          {entryStatus ? (
+            <p className="text-sm">
+              Entry status: <span className="font-medium">{entryStatus}</span>
+            </p>
+          ) : null}
           {currentIndexing ? (
-            <div className="space-y-2 text-sm">
+            <div className="space-y-1 border-t border-foreground pt-3 text-sm">
               <p>
                 Type: <span className="font-medium capitalize">{currentIndexing.type}</span>
               </p>
@@ -1863,131 +2581,25 @@ export function AppPage() {
                   {currentIndexing.tags.length > 0 ? currentIndexing.tags.map((tag) => `#${tag}`).join(', ') : 'None'}
                 </span>
               </p>
+              {currentTimelineEntry?.sentimentLabel ? (
+                <p>
+                  Sentiment:{' '}
+                  <span className="font-medium capitalize">
+                    {currentTimelineEntry.sentimentLabel}
+                    {typeof currentTimelineEntry.sentimentScore === 'number'
+                      ? ` (${Math.round(currentTimelineEntry.sentimentScore * 100)}%)`
+                      : ''}
+                  </span>
+                </p>
+              ) : null}
             </div>
           ) : (
             <p className="text-sm text-muted-foreground">No indexing saved for this entry yet.</p>
           )}
+          {errorMessage ? <p className="text-sm text-foreground">{errorMessage}</p> : null}
         </section>
-        <div className="mt-6 space-y-4 rounded-md border bg-background p-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <h2 className="text-base font-semibold">Ask</h2>
-            <span className="text-xs text-muted-foreground">Sources-first retrieval</span>
-          </div>
-          <p className="text-sm text-muted-foreground">Ask a question, use a template, filter by date range, and review source snippets.</p>
-          <form onSubmit={handleAskSubmit} className="flex flex-col gap-3 sm:flex-row">
-            <input
-              type="search"
-              value={askQueryInput}
-              onChange={(event) => setAskQueryInput(event.target.value)}
-              placeholder="Ask from your transcripts..."
-              className="h-10 w-full rounded-md border bg-background px-3 text-sm"
-            />
-            <Button type="submit" disabled={isAskLoading} className="sm:w-auto">
-              {isAskLoading ? 'Finding sources...' : 'Find sources'}
-            </Button>
-          </form>
-          <div className="flex flex-wrap gap-2">
-            {ASK_TEMPLATES.map((template) => (
-              <Button
-                key={template.label}
-                type="button"
-                size="sm"
-                variant="outline"
-                onClick={() => applyAskTemplate(template.query)}
-                disabled={isAskLoading}
-              >
-                {template.label}
-              </Button>
-            ))}
-          </div>
-          <div className="grid gap-3 md:grid-cols-2">
-            <label className="space-y-1 text-sm">
-              <span className="font-medium">Date from</span>
-              <input
-                type="date"
-                value={askDateFrom}
-                onChange={(event) => setAskDateFrom(event.target.value)}
-                className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-              />
-            </label>
-            <label className="space-y-1 text-sm">
-              <span className="font-medium">Date to</span>
-              <input
-                type="date"
-                value={askDateTo}
-                onChange={(event) => setAskDateTo(event.target.value)}
-                className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-              />
-            </label>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => {
-                setAskDateFrom('');
-                setAskDateTo('');
-              }}
-            >
-              Clear range
-            </Button>
-          </div>
-          {askError ? <p className="text-sm text-destructive">{askError}</p> : null}
-          {isAskLoading ? <p className="text-sm text-muted-foreground">Loading sources...</p> : null}
-          {filteredAskSources.length > 0 ? (
-            <div className="space-y-3">
-              {filteredAskSources.map((source, index) => {
-                const sourceDate = timelineByEntry[source.entryId]?.occurredAt ?? timelineByEntry[source.entryId]?.createdAt;
-                const citation: AskSummaryCitation = {
-                  snippetId: `${source.entryId}:${source.startChar}:${source.endChar}:${index}`,
-                  entryId: source.entryId,
-                  startChar: source.startChar,
-                  endChar: source.endChar,
-                  snippetText: source.snippetText
-                };
-                return (
-                  <article key={`${source.entryId}-${source.startChar}-${source.endChar}-${index}`} className="rounded-md border p-3">
-                    <p className="text-xs text-muted-foreground">
-                      Entry: {source.entryId}
-                      {sourceDate ? ` | ${formatTimelineDate(sourceDate)}` : ''}
-                    </p>
-                    <p className="mt-2 text-sm">{source.snippetText}</p>
-                    <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-                      <p className="text-xs text-muted-foreground">
-                        Source offsets: {source.startChar}-{source.endChar}
-                      </p>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => openAskCitation(citation)}
-                      >
-                        Open source
-                      </Button>
-                    </div>
-                  </article>
-                );
-              })}
-            </div>
-          ) : null}
-          <div className="rounded-md border bg-muted/20 p-3">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <h3 className="text-sm font-semibold">Summary</h3>
-              <span className="text-xs text-muted-foreground">Per-sentence citations</span>
-            </div>
-            <p className="mt-1 text-xs text-muted-foreground">Every summary sentence includes clickable evidence that jumps to transcript highlights.</p>
-            <div className="mt-3">
-              <AskSummaryRenderer
-                sentences={askSummarySentences}
-                citationsBySnippetId={askSummaryCitationsBySnippetId}
-                onOpenCitation={openAskCitation}
-              />
-            </div>
-          </div>
-          {hasAskAttempt && !isAskLoading && !askError && filteredAskSources.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No sources found for "{submittedAskQuery}" in the selected range.</p>
-          ) : null}
-        </div>
-        <div className="mt-6 space-y-4 rounded-md border bg-background p-4">
+
+            <div className="mono-section mt-6 space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <h2 className="text-base font-semibold">Search</h2>
             <span className="text-xs text-muted-foreground">Transcript search with highlight jump</span>
@@ -1998,18 +2610,18 @@ export function AppPage() {
               value={searchQueryInput}
               onChange={(event) => setSearchQueryInput(event.target.value)}
               placeholder="Search transcripts..."
-              className="h-10 w-full rounded-md border bg-background px-3 text-sm"
+              className="h-10 w-full rounded-none border bg-background px-3 text-sm"
             />
             <Button type="submit" disabled={isSearchLoading} className="sm:w-auto">
               {isSearchLoading ? 'Searching...' : 'Search'}
             </Button>
           </form>
-          {searchError ? <p className="text-sm text-destructive">{searchError}</p> : null}
+          {searchError ? <p className="text-sm text-foreground">{searchError}</p> : null}
           {isSearchLoading ? <p className="text-sm text-muted-foreground">Loading results...</p> : null}
           {searchResults.length > 0 ? (
             <div className="space-y-3">
               {searchResults.map((result, index) => (
-                <article key={`${result.entryId}-${result.startChar}-${result.endChar}-${index}`} className="rounded-md border p-3">
+                <article key={`${result.entryId}-${result.startChar}-${result.endChar}-${index}`} className="border border-foreground p-3">
                   <p className="text-xs text-muted-foreground">Entry: {result.entryId}</p>
                   <p className="mt-2 text-sm">{result.snippetText}</p>
                   <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
@@ -2041,7 +2653,8 @@ export function AppPage() {
             <p className="text-sm text-muted-foreground">No matches found for "{submittedSearchQuery}".</p>
           ) : null}
         </div>
-        <div className="mt-6 space-y-4 rounded-md border bg-background p-4">
+
+        <div className="mono-section mt-6 space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <h2 className="text-base font-semibold">What gets sent</h2>
             <span className="text-xs text-muted-foreground">Preview provider-bound payload before summarization</span>
@@ -2053,7 +2666,7 @@ export function AppPage() {
               value={askQuestionInput}
               onChange={(event) => setAskQuestionInput(event.target.value)}
               placeholder="What should I summarize from these sources?"
-              className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+              className="w-full rounded-none border bg-background px-3 py-2 text-sm"
             />
           </label>
           <div className="grid gap-3 md:grid-cols-2">
@@ -2063,7 +2676,7 @@ export function AppPage() {
                 type="date"
                 value={askDateFrom}
                 onChange={(event) => setAskDateFrom(event.target.value)}
-                className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                className="w-full rounded-none border bg-background px-3 py-2 text-sm"
               />
             </label>
             <label className="space-y-1 text-sm">
@@ -2072,11 +2685,11 @@ export function AppPage() {
                 type="date"
                 value={askDateTo}
                 onChange={(event) => setAskDateTo(event.target.value)}
-                className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                className="w-full rounded-none border bg-background px-3 py-2 text-sm"
               />
             </label>
           </div>
-          <div className="space-y-2 rounded-md border bg-muted/20 p-3 text-sm">
+          <div className="space-y-2 rounded-none border bg-muted/20 p-3 text-sm">
             <label className="flex items-center gap-2">
               <input
                 type="checkbox"
@@ -2129,22 +2742,23 @@ export function AppPage() {
             </Button>
           </div>
         </div>
-        <div className="mt-6 space-y-4 rounded-md border bg-background p-4">
+
+        <div className="mono-section mt-6 space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <h2 className="text-base font-semibold">Data export</h2>
             <span className="text-xs text-muted-foreground">Privacy and portability</span>
           </div>
           <p className="text-sm text-muted-foreground">Request a full account export, check status, and download the archive when it is ready.</p>
-          <div className="rounded-md border border-emerald-200 bg-emerald-50 p-3">
+          <div className="rounded-none border border bg-muted p-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <h3 className="text-sm font-semibold text-emerald-900">Export all data</h3>
+              <h3 className="text-sm font-semibold text-foreground">Export all data</h3>
               {dataExportStatusLabel ? (
-                <span className="rounded-full border border-emerald-300 bg-white px-2 py-1 text-xs font-medium text-emerald-900">
+                <span className="rounded-none border border bg-white px-2 py-1 text-xs font-medium text-foreground">
                   Status: {dataExportStatusLabel}
                 </span>
               ) : null}
             </div>
-            <p className="mt-1 text-xs text-emerald-900/80">Includes transcripts, tags, brag bullets, and uploaded audio assets.</p>
+            <p className="mt-1 text-xs text-foreground">Includes transcripts, tags, brag bullets, and uploaded audio assets.</p>
             <div className="mt-3 flex flex-wrap gap-2">
               <Button onClick={handleRequestDataExport} disabled={isRequestingDataExport || isCheckingDataExport || isDownloadingDataExport}>
                 {isRequestingDataExport ? 'Requesting export...' : 'Request export'}
@@ -2164,46 +2778,46 @@ export function AppPage() {
                 {isDownloadingDataExport ? 'Downloading...' : 'Download export'}
               </Button>
             </div>
-            {dataExportJob ? <p className="mt-2 text-xs text-emerald-900/80">Job ID: <span className="font-mono">{dataExportJob.id}</span></p> : null}
-            {dataExportNotice ? <p className="mt-2 text-xs text-emerald-700">{dataExportNotice}</p> : null}
-            {dataExportError ? <p className="mt-2 text-xs text-destructive">{dataExportError}</p> : null}
+            {dataExportJob ? <p className="mt-2 text-xs text-foreground">Job ID: <span className="font-mono">{dataExportJob.id}</span></p> : null}
+            {dataExportNotice ? <p className="mt-2 text-xs text-foreground">{dataExportNotice}</p> : null}
+            {dataExportError ? <p className="mt-2 text-xs text-foreground">{dataExportError}</p> : null}
           </div>
-          <div className="rounded-md border border-red-200 bg-red-50 p-3">
+          <div className="rounded-none border border bg-foreground p-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <h3 className="text-sm font-semibold text-red-900">Delete account</h3>
-              <span className="rounded-full border border-red-300 bg-white px-2 py-1 text-xs font-medium text-red-900">Permanent</span>
+              <h3 className="text-sm font-semibold text-foreground">Delete account</h3>
+              <span className="rounded-none border border bg-white px-2 py-1 text-xs font-medium text-foreground">Permanent</span>
             </div>
-            <p className="mt-1 text-xs text-red-900/85">
+            <p className="mt-1 text-xs text-foreground">
               This permanently deletes your account, audio files, transcripts, tags, exports, and saved drafts. This action cannot be undone.
             </p>
-            <ul className="mt-2 list-disc space-y-1 pl-5 text-xs text-red-900/85">
+            <ul className="mt-2 list-disc space-y-1 pl-5 text-xs text-foreground">
               <li>Export your data before deleting so you keep a copy.</li>
               <li>Deletion signs you out on this device.</li>
               <li>Recovery is not possible after confirmation.</li>
             </ul>
             <form className="mt-3 space-y-3" onSubmit={handleDeleteAccount}>
               <label className="space-y-1 text-sm">
-                <span className="font-medium text-red-900">Current password</span>
+                <span className="font-medium text-foreground">Current password</span>
                 <input
                   type="password"
                   autoComplete="current-password"
                   value={deleteAccountPassword}
                   onChange={(event) => setDeleteAccountPassword(event.target.value)}
-                  className="w-full rounded-md border border-red-200 bg-white px-3 py-2 text-sm"
+                  className="w-full rounded-none border border bg-white px-3 py-2 text-sm"
                   disabled={isDeletingAccount}
                 />
               </label>
               <label className="space-y-1 text-sm">
-                <span className="font-medium text-red-900">Type {DELETE_ACCOUNT_CONFIRMATION_TEXT}</span>
+                <span className="font-medium text-foreground">Type {DELETE_ACCOUNT_CONFIRMATION_TEXT}</span>
                 <input
                   type="text"
                   value={deleteAccountConfirmationInput}
                   onChange={(event) => setDeleteAccountConfirmationInput(event.target.value)}
-                  className="w-full rounded-md border border-red-200 bg-white px-3 py-2 font-mono text-sm"
+                  className="w-full rounded-none border border bg-white px-3 py-2 font-mono text-sm"
                   disabled={isDeletingAccount}
                 />
               </label>
-              <label className="flex items-start gap-2 text-xs text-red-900">
+              <label className="flex items-start gap-2 text-xs text-foreground">
                 <input
                   type="checkbox"
                   className="mt-0.5"
@@ -2213,15 +2827,15 @@ export function AppPage() {
                 />
                 <span>I understand this is irreversible and permanently removes my data.</span>
               </label>
-              <Button type="submit" disabled={!canSubmitDeleteAccount} className="bg-red-700 text-white hover:bg-red-800">
+              <Button type="submit" disabled={!canSubmitDeleteAccount} className="bg-foreground text-background hover:bg-foreground">
                 {isDeletingAccount ? 'Deleting account...' : 'Delete account permanently'}
               </Button>
             </form>
-            {deleteAccountNotice ? <p className="mt-2 text-xs text-emerald-700">{deleteAccountNotice}</p> : null}
-            {deleteAccountError ? <p className="mt-2 text-xs text-destructive">{deleteAccountError}</p> : null}
+            {deleteAccountNotice ? <p className="mt-2 text-xs text-foreground">{deleteAccountNotice}</p> : null}
+            {deleteAccountError ? <p className="mt-2 text-xs text-foreground">{deleteAccountError}</p> : null}
           </div>
         </div>
-        <div className="mt-6 space-y-4 rounded-md border bg-background p-4">
+        <div className="mono-section mt-6 space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <h2 className="text-base font-semibold">Brag Doc</h2>
             <span className="text-xs text-muted-foreground">{bragDraftsInRange.length} bullets in range</span>
@@ -2234,7 +2848,7 @@ export function AppPage() {
                 type="date"
                 value={bragDateFrom}
                 onChange={(event) => setBragDateFrom(event.target.value)}
-                className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                className="w-full rounded-none border bg-background px-3 py-2 text-sm"
               />
             </label>
             <label className="space-y-1 text-sm">
@@ -2243,7 +2857,7 @@ export function AppPage() {
                 type="date"
                 value={bragDateTo}
                 onChange={(event) => setBragDateTo(event.target.value)}
-                className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                className="w-full rounded-none border bg-background px-3 py-2 text-sm"
               />
             </label>
           </div>
@@ -2259,16 +2873,16 @@ export function AppPage() {
               Clear range
             </Button>
           </div>
-          <div className="rounded-md border border-cyan-200 bg-cyan-50 p-3">
+          <div className="rounded-none border border bg-muted p-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <h3 className="text-sm font-semibold text-cyan-900">Export report</h3>
+              <h3 className="text-sm font-semibold text-foreground">Export report</h3>
               {bragExportStatusLabel ? (
-                <span className="rounded-full border border-cyan-300 bg-white px-2 py-1 text-xs font-medium text-cyan-900">
+                <span className="rounded-none border border bg-white px-2 py-1 text-xs font-medium text-foreground">
                   Status: {bragExportStatusLabel}
                 </span>
               ) : null}
             </div>
-            <p className="mt-1 text-xs text-cyan-900/80">Request a text export, check job status, and download when ready.</p>
+            <p className="mt-1 text-xs text-foreground">Request a text export, check job status, and download when ready.</p>
             <div className="mt-3 flex flex-wrap gap-2">
               <Button onClick={handleRequestBragExport} disabled={isRequestingBragExport || isCheckingBragExport || isDownloadingBragExport}>
                 {isRequestingBragExport ? 'Requesting export...' : 'Request export'}
@@ -2288,13 +2902,13 @@ export function AppPage() {
                 {isDownloadingBragExport ? 'Downloading...' : 'Download export'}
               </Button>
             </div>
-            {bragExportJob ? <p className="mt-2 text-xs text-cyan-900/80">Job ID: <span className="font-mono">{bragExportJob.id}</span></p> : null}
-            {bragExportNotice ? <p className="mt-2 text-xs text-emerald-700">{bragExportNotice}</p> : null}
-            {bragExportError ? <p className="mt-2 text-xs text-destructive">{bragExportError}</p> : null}
+            {bragExportJob ? <p className="mt-2 text-xs text-foreground">Job ID: <span className="font-mono">{bragExportJob.id}</span></p> : null}
+            {bragExportNotice ? <p className="mt-2 text-xs text-foreground">{bragExportNotice}</p> : null}
+            {bragExportError ? <p className="mt-2 text-xs text-foreground">{bragExportError}</p> : null}
           </div>
           <div className="space-y-3">
             {[...BRAG_BUCKETS, BRAG_UNASSIGNED_BUCKET].map((bucket) => (
-              <article key={bucket} className="rounded-md border p-3">
+              <article key={bucket} className="border border-foreground p-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <h3 className="text-sm font-semibold">{bucket}</h3>
                   <span className="text-xs text-muted-foreground">{bragDraftsByBucket[bucket].length} bullets</span>
@@ -2312,7 +2926,7 @@ export function AppPage() {
                             value={draft.claimText}
                             onChange={(event) => handleBragClaimTextChange(draft.id, event.target.value)}
                             placeholder="Write an impact claim..."
-                            className="min-h-20 w-full rounded-md border bg-background p-2 text-sm"
+                            className="min-h-20 w-full rounded-none border bg-background p-2 text-sm"
                           />
                           <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
                             <span className="text-xs text-muted-foreground">
@@ -2328,7 +2942,7 @@ export function AppPage() {
                               <select
                                 value={isKnownBragBucket(draft.bucket) ? draft.bucket : ''}
                                 onChange={(event) => handleBragBucketChange(draft.id, event.target.value)}
-                                className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                                className="w-full rounded-none border bg-background px-2 py-1 text-sm"
                               >
                                 <option value="">Unassigned</option>
                                 {BRAG_BUCKETS.map((option) => (
@@ -2341,7 +2955,7 @@ export function AppPage() {
                           </div>
                           <p className="mt-2 text-xs text-muted-foreground">Added {formatBragDate(draft.createdAt)}</p>
                           {isEvidenceExpanded ? (
-                            <div className="mt-2 space-y-2 rounded-md border bg-background p-2">
+                            <div className="mt-2 space-y-2 rounded-none border bg-background p-2">
                               {draft.evidence.map((evidence, evidenceIndex) => (
                                 <div key={`${draft.id}-${evidence.entryId}-${evidence.startChar}-${evidenceIndex}`} className="rounded border p-2">
                                   <p className="text-xs text-muted-foreground">
@@ -2361,138 +2975,9 @@ export function AppPage() {
               </article>
             ))}
           </div>
-        </div>
-        <div className="mt-6 space-y-4 rounded-md border bg-background p-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <h2 className="text-base font-semibold">Timeline</h2>
-            <span className="text-xs text-muted-foreground">
-              Showing {filteredTimelineEntries.length} of {timelineEntries.length}
-            </span>
-          </div>
-          <p className="text-sm text-muted-foreground">Filter by date range, type, context, and tags.</p>
-          <div className="grid gap-3 md:grid-cols-2">
-            <label className="space-y-1 text-sm">
-              <span className="font-medium">Date from</span>
-              <input
-                type="date"
-                value={timelineDateFrom}
-                onChange={(event) => setTimelineDateFrom(event.target.value)}
-                className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-              />
-            </label>
-            <label className="space-y-1 text-sm">
-              <span className="font-medium">Date to</span>
-              <input
-                type="date"
-                value={timelineDateTo}
-                onChange={(event) => setTimelineDateTo(event.target.value)}
-                className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-              />
-            </label>
-            <label className="space-y-1 text-sm">
-              <span className="font-medium">Type</span>
-              <select
-                value={timelineTypeFilter}
-                onChange={(event) => setTimelineTypeFilter(event.target.value)}
-                className="w-full rounded-md border bg-background px-3 py-2 text-sm capitalize"
-              >
-                <option value="all">All types</option>
-                {typeFilterOptions.map((option) => (
-                  <option key={option} value={option} className="capitalize">
-                    {option}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="space-y-1 text-sm">
-              <span className="font-medium">Context</span>
-              <select
-                value={timelineContextFilter}
-                onChange={(event) => setTimelineContextFilter(event.target.value as 'all' | EntryContext)}
-                className="w-full rounded-md border bg-background px-3 py-2 text-sm capitalize"
-              >
-                <option value="all">All contexts</option>
-                <option value="work">Work</option>
-                <option value="life">Life</option>
-              </select>
-            </label>
-          </div>
-          <label className="space-y-1 text-sm">
-            <span className="font-medium">Tags (comma-separated)</span>
-            <input
-              type="text"
-              value={timelineTagFilterInput}
-              onChange={(event) => setTimelineTagFilterInput(event.target.value)}
-              placeholder="e.g. project-x, retro"
-              className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-            />
-            {allKnownTags.length > 0 ? (
-              <span className="block text-xs text-muted-foreground">Known tags: {allKnownTags.map((tag) => `#${tag}`).join(', ')}</span>
-            ) : null}
-          </label>
-          <div className="flex flex-wrap gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => {
-                setTimelineDateFrom('');
-                setTimelineDateTo('');
-                setTimelineTypeFilter('all');
-                setTimelineContextFilter('all');
-                setTimelineTagFilterInput('');
-              }}
-            >
-              Clear filters
-            </Button>
-          </div>
-          {isTimelineLoading ? <p className="text-sm text-muted-foreground">Loading timeline...</p> : null}
-          {timelineError ? <p className="text-sm text-destructive">{timelineError}</p> : null}
-          {filteredTimelineEntries.length > 0 ? (
-            <div className="space-y-3">
-              {filteredTimelineEntries.map((entry) => (
-                <article key={entry.entryId} className="rounded-md border p-3">
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div>
-                      <h3 className="text-sm font-semibold">{entry.title ?? 'Untitled entry'}</h3>
-                      <p className="text-xs text-muted-foreground">{formatTimelineDate(entry.occurredAt ?? entry.createdAt)}</p>
-                    </div>
-                    <Button size="sm" variant="outline" onClick={() => navigate(`/app/entries/${entry.entryId}`)}>
-                      Open
-                    </Button>
-                  </div>
-                  <div className="mt-2 flex flex-wrap gap-2 text-xs">
-                    <span className="rounded-full bg-secondary px-2 py-1">Status: {entry.status ?? 'unknown'}</span>
-                    {entry.type ? <span className="rounded-full bg-emerald-100 px-2 py-1 text-emerald-900 capitalize">{entry.type}</span> : null}
-                    {entry.context ? <span className="rounded-full bg-cyan-100 px-2 py-1 text-cyan-900 capitalize">{entry.context}</span> : null}
-                    {entry.tags.map((tag) => (
-                      <span key={`${entry.entryId}-${tag}`} className="rounded-full bg-slate-100 px-2 py-1 text-slate-700">
-                        #{tag}
-                      </span>
-                    ))}
-                  </div>
-                  <p className="mt-2 rounded-md border border-cyan-200 bg-cyan-50 px-2 py-1 text-xs italic text-cyan-900">
-                    {getTimelineQuoteChipText(entry)}
-                  </p>
-                  <p className="mt-2 truncate font-mono text-xs text-muted-foreground">{entry.entryId}</p>
-                </article>
-              ))}
             </div>
-          ) : hasAnyTimelineEntries ? (
-            <p className="text-sm text-muted-foreground">No entries match the selected filters yet.</p>
-          ) : (
-            <div className="rounded-md border border-dashed p-4">
-              <p className="text-sm font-medium">No entries yet.</p>
-              <p className="mt-1 text-sm text-muted-foreground">
-                Upload your first note to start transcription, quick indexing, and source-backed retrieval.
-              </p>
-              <div className="mt-3">
-                <Button size="sm" onClick={() => scrollToSection(uploadSectionRef, 'input[type=\"file\"]')}>
-                  Upload first note
-                </Button>
-              </div>
-            </div>
-          )}
-        </div>
+          </>
+        ) : null}
         <div className="mt-6">
           <Button onClick={handleLogout} disabled={isLoggingOut} variant="outline">
             {isLoggingOut ? 'Logging out...' : 'Logout'}
@@ -2505,7 +2990,7 @@ export function AppPage() {
             role="dialog"
             aria-modal="true"
             aria-labelledby="what-gets-sent-title"
-            className="w-full max-w-3xl rounded-lg border bg-card p-6 text-card-foreground shadow-lg"
+            className="w-full max-w-3xl rounded-none border bg-card p-6 text-card-foreground "
           >
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
@@ -2518,7 +3003,7 @@ export function AppPage() {
                 Close
               </Button>
             </div>
-            <div className="mt-4 rounded-md border bg-muted/20 p-3">
+            <div className="mt-4 rounded-none border bg-muted/20 p-3">
               <pre className="max-h-[60vh] overflow-auto text-xs">{askPreviewPayloadJson}</pre>
             </div>
           </section>
@@ -2530,7 +3015,7 @@ export function AppPage() {
             role="dialog"
             aria-modal="true"
             aria-labelledby="quick-indexing-title"
-            className="w-full max-w-lg rounded-lg border bg-card p-6 text-card-foreground shadow-lg"
+            className="w-full max-w-lg rounded-none border bg-card p-6 text-card-foreground "
           >
             <h2 id="quick-indexing-title" className="text-lg font-semibold">
               Quick indexing
@@ -2547,10 +3032,10 @@ export function AppPage() {
                       key={option}
                       type="button"
                       onClick={() => setIndexType(option)}
-                      className={`rounded-md border px-3 py-2 text-sm capitalize transition ${
+                      className={`rounded-none border px-3 py-2 text-sm capitalize transition-none ${
                         isSelected
-                          ? 'border-emerald-600 bg-emerald-100 text-emerald-900'
-                          : 'border-input bg-background hover:bg-accent hover:text-accent-foreground'
+                          ? 'border-foreground bg-foreground text-background'
+                          : 'border-foreground bg-background hover:bg-foreground hover:text-background'
                       }`}
                     >
                       {option}
@@ -2570,10 +3055,10 @@ export function AppPage() {
                       key={option}
                       type="button"
                       onClick={() => setIndexContext(option)}
-                      className={`rounded-md border px-3 py-2 text-sm capitalize transition ${
+                      className={`rounded-none border px-3 py-2 text-sm capitalize transition-none ${
                         isSelected
-                          ? 'border-cyan-600 bg-cyan-100 text-cyan-900'
-                          : 'border-input bg-background hover:bg-accent hover:text-accent-foreground'
+                          ? 'border-foreground bg-foreground text-background'
+                          : 'border-foreground bg-background hover:bg-foreground hover:text-background'
                       }`}
                     >
                       {option}
@@ -2593,7 +3078,7 @@ export function AppPage() {
                 value={indexTagsInput}
                 onChange={(event) => setIndexTagsInput(event.target.value)}
                 placeholder="comma-separated tags"
-                className="mt-2 w-full rounded-md border bg-background px-3 py-2 text-sm"
+                className="mt-2 w-full rounded-none border bg-background px-3 py-2 text-sm"
               />
             </div>
 

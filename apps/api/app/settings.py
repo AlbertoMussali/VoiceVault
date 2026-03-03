@@ -31,6 +31,7 @@ DEFAULT_ENTRY_AUTH_TOKEN = "dev-entry-token"
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_OPENAI_STT_MODEL = "gpt-4o-mini-transcribe"
 DEFAULT_OPENAI_SUMMARY_MODEL = "gpt-4o-mini"
+DEFAULT_OPENAI_INDEXING_MODEL = "gpt-4o-mini"
 DEFAULT_REQUIRE_ZERO_RETENTION = False
 DEFAULT_PROVIDER_ZERO_RETENTION_APPROVED = False
 DEFAULT_MAX_REQUEST_SIZE_BYTES = 2 * 1024 * 1024
@@ -44,6 +45,10 @@ DEFAULT_CORS_ALLOWED_ORIGINS = (
     "http://localhost:3000",
     "http://127.0.0.1:3000",
 )
+DEFAULT_DEMO_SEED_ENABLED = False
+DEFAULT_DEMO_SEED_EMAIL = "demo@demo"
+DEFAULT_DEMO_SEED_PASSWORD = "demo"
+DEFAULT_DEMO_SEED_DAYS = 30
 
 
 def get_database_url() -> str:
@@ -86,6 +91,7 @@ class Settings:
     openai_base_url: str
     openai_stt_model: str
     openai_summary_model: str
+    openai_indexing_model: str
     require_zero_retention: bool
     provider_zero_retention_approved: bool
     max_request_size_bytes: int
@@ -94,6 +100,10 @@ class Settings:
     rate_limit_requests: int
     rate_limit_auth_requests: int
     cors_allowed_origins: tuple[str, ...]
+    demo_seed_enabled: bool
+    demo_seed_email: str
+    demo_seed_password: str
+    demo_seed_days: int
 
 
 def _read_bool_env(name: str, default: bool) -> bool:
@@ -179,6 +189,7 @@ def get_settings() -> Settings:
         openai_base_url=os.getenv("OPENAI_BASE_URL", DEFAULT_OPENAI_BASE_URL),
         openai_stt_model=os.getenv("OPENAI_STT_MODEL", DEFAULT_OPENAI_STT_MODEL),
         openai_summary_model=os.getenv("OPENAI_SUMMARY_MODEL", DEFAULT_OPENAI_SUMMARY_MODEL),
+        openai_indexing_model=os.getenv("OPENAI_INDEXING_MODEL", DEFAULT_OPENAI_INDEXING_MODEL),
         require_zero_retention=_read_bool_env("REQUIRE_ZERO_RETENTION", DEFAULT_REQUIRE_ZERO_RETENTION),
         provider_zero_retention_approved=_read_bool_env(
             "PROVIDER_ZERO_RETENTION_APPROVED",
@@ -199,4 +210,8 @@ def get_settings() -> Settings:
             DEFAULT_RATE_LIMIT_AUTH_REQUESTS,
         ),
         cors_allowed_origins=_read_csv_env("CORS_ALLOWED_ORIGINS", DEFAULT_CORS_ALLOWED_ORIGINS),
+        demo_seed_enabled=_read_bool_env("DEMO_SEED_ENABLED", DEFAULT_DEMO_SEED_ENABLED),
+        demo_seed_email=os.getenv("DEMO_SEED_EMAIL", DEFAULT_DEMO_SEED_EMAIL),
+        demo_seed_password=os.getenv("DEMO_SEED_PASSWORD", DEFAULT_DEMO_SEED_PASSWORD),
+        demo_seed_days=_read_positive_int_env("DEMO_SEED_DAYS", DEFAULT_DEMO_SEED_DAYS),
     )

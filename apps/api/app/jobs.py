@@ -4,6 +4,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 import io
 import json
+import logging
 import os
 from typing import Any
 import uuid
@@ -31,12 +32,14 @@ from app.models import (
     Tag,
     Transcript,
 )
+from app.openai_indexing import classify_transcript, estimate_indexing_request_bytes
 from app.openai_summary import AskSummarySentence, generate_summary_sentences
 from app.openai_stt import transcribe_audio_bytes
 from app.settings import get_redis_url, get_settings
 from app.storage import get_storage_backend
 
 DEFAULT_QUEUE_NAME = "default"
+job_logger = logging.getLogger("voicevault.jobs")
 
 
 def run_stub_job(payload: str = "ok") -> dict[str, str]:
@@ -93,6 +96,8 @@ def run_transcription_job(entry_id: str, audio_asset_id: str | None = None) -> d
                 transcription.text,
                 fallback=fallback_entry_title(entry_uuid),
             )
+
+        _apply_transcript_indexing(session=session, entry=entry, transcript_text=transcription.text)
         entry.status = "ready"
         session.commit()
         session.refresh(transcript)
@@ -106,6 +111,93 @@ def run_transcription_job(entry_id: str, audio_asset_id: str | None = None) -> d
         }
     finally:
         session.close()
+
+
+def _apply_transcript_indexing(*, session: Session, entry: Entry, transcript_text: str) -> None:
+    settings = get_settings()
+    session.add(
+        AuditLog(
+            user_id=entry.user_id,
+            entry_id=entry.id,
+            event_type="llm_called",
+            metadata_json={
+                "model": settings.openai_indexing_model,
+                "task": "transcript_indexing",
+                "byte_estimate": estimate_indexing_request_bytes(transcript_text=transcript_text),
+            },
+        )
+    )
+
+    try:
+        indexing = classify_transcript(transcript_text=transcript_text)
+    except RuntimeError:
+        job_logger.warning(
+            "transcript_indexing_failed",
+            extra={"fields": {"entry_id": str(entry.id)}},
+            exc_info=True,
+        )
+        return
+
+    entry.entry_type = indexing.entry_type
+    entry.context = indexing.context
+    entry.sentiment_label = indexing.sentiment_label
+    entry.sentiment_score = indexing.sentiment_score
+    _upsert_entry_tags(
+        session=session,
+        user_id=entry.user_id,
+        entry_id=entry.id,
+        tag_names=indexing.tags,
+    )
+
+
+def _upsert_entry_tags(
+    *,
+    session: Session,
+    user_id: uuid.UUID,
+    entry_id: uuid.UUID,
+    tag_names: list[str],
+) -> None:
+    normalized_names = [name.strip().lower() for name in tag_names if name and name.strip()]
+    if not normalized_names:
+        return
+
+    existing_tags = (
+        session.execute(
+            select(Tag).where(
+                Tag.user_id == user_id,
+                Tag.normalized_name.in_(normalized_names),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    tags_by_name = {tag.normalized_name: tag for tag in existing_tags}
+
+    for normalized_name in normalized_names:
+        if normalized_name in tags_by_name:
+            continue
+        tag = Tag(
+            user_id=user_id,
+            name=normalized_name,
+            normalized_name=normalized_name,
+        )
+        session.add(tag)
+        session.flush()
+        tags_by_name[normalized_name] = tag
+
+    existing_links = (
+        session.execute(select(EntryTag.tag_id).where(EntryTag.entry_id == entry_id))
+        .scalars()
+        .all()
+    )
+    linked_tag_ids = set(existing_links)
+
+    for normalized_name in normalized_names:
+        tag = tags_by_name.get(normalized_name)
+        if tag is None or tag.id in linked_tag_ids:
+            continue
+        session.add(EntryTag(entry_id=entry_id, tag_id=tag.id))
+        linked_tag_ids.add(tag.id)
 
 
 def run_brag_text_export_job(export_job_id: str) -> dict[str, Any]:

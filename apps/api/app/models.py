@@ -67,6 +67,12 @@ class RefreshSession(Base):
 
 class Entry(Base):
     __tablename__ = "entries"
+    __table_args__ = (
+        CheckConstraint(
+            "(sentiment_score IS NULL) OR (sentiment_score >= 0 AND sentiment_score <= 1)",
+            name="ck_entries_sentiment_score_range",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(
@@ -79,6 +85,8 @@ class Entry(Base):
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="draft")
     entry_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
     context: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    sentiment_label: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    sentiment_score: Mapped[Decimal | None] = mapped_column(Numeric(4, 3), nullable=True)
     occurred_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())

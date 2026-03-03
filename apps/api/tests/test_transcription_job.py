@@ -15,7 +15,7 @@ if str(ROOT) not in sys.path:
 from app.db import get_sessionmaker, initialize_schema, reset_engine_cache
 from app.entry_titles import fallback_entry_title
 from app.jobs import JOB_REGISTRY, run_transcription_job
-from app.models import AuditLog, AudioAsset, Entry, Transcript, User
+from app.models import AuditLog, AudioAsset, Entry, EntryTag, Tag, Transcript, User
 from app.openai_stt import TranscriptionResult
 from app.settings import get_settings
 from app.storage import get_storage_backend
@@ -68,7 +68,20 @@ class TranscriptionJobTests(unittest.TestCase):
         with patch(
             "app.jobs.transcribe_audio_bytes",
             return_value=TranscriptionResult(text="hello from stt", language_code="en"),
-        ) as mocked_transcriber:
+        ) as mocked_transcriber, patch(
+            "app.jobs.classify_transcript"
+        ) as mocked_classifier:
+            mocked_classifier.return_value = type(
+                "IndexingStub",
+                (),
+                {
+                    "entry_type": "win",
+                    "context": "work",
+                    "tags": ["shipping", "teamwork"],
+                    "sentiment_label": "positive",
+                    "sentiment_score": 0.92,
+                },
+            )()
             result = run_transcription_job(str(entry_id), str(audio_asset_id))
 
         self.assertEqual(result["status"], "ok")
@@ -83,6 +96,17 @@ class TranscriptionJobTests(unittest.TestCase):
             assert entry is not None
             self.assertEqual(entry.status, "ready")
             self.assertEqual(entry.title, "hello from stt")
+            self.assertEqual(entry.entry_type, "win")
+            self.assertEqual(entry.context, "work")
+            self.assertEqual(entry.sentiment_label, "positive")
+            self.assertAlmostEqual(float(entry.sentiment_score), 0.92, places=3)
+            linked_tags = (
+                session.query(Tag)
+                .join(EntryTag, EntryTag.tag_id == Tag.id)
+                .filter(EntryTag.entry_id == entry_id)
+                .all()
+            )
+            self.assertEqual({tag.normalized_name for tag in linked_tags}, {"shipping", "teamwork"})
 
             transcripts = session.query(Transcript).filter(Transcript.entry_id == entry_id).all()
             self.assertEqual(len(transcripts), 1)
@@ -110,6 +134,31 @@ class TranscriptionJobTests(unittest.TestCase):
             session.close()
 
         mocked_transcriber.assert_called_once()
+        mocked_classifier.assert_called_once()
+
+    def test_run_transcription_job_keeps_ready_when_indexing_fails(self) -> None:
+        entry_id, audio_asset_id = self._create_entry_with_audio()
+
+        with patch(
+            "app.jobs.transcribe_audio_bytes",
+            return_value=TranscriptionResult(text="hello from stt", language_code="en"),
+        ), patch(
+            "app.jobs.classify_transcript",
+            side_effect=RuntimeError("indexing unavailable"),
+        ):
+            result = run_transcription_job(str(entry_id), str(audio_asset_id))
+
+        self.assertEqual(result["status"], "ok")
+        session = get_sessionmaker()()
+        try:
+            entry = session.get(Entry, entry_id)
+            self.assertIsNotNone(entry)
+            assert entry is not None
+            self.assertEqual(entry.status, "ready")
+            self.assertIsNone(entry.sentiment_label)
+            self.assertIsNone(entry.sentiment_score)
+        finally:
+            session.close()
 
     def _create_entry_with_audio(self, *, with_title: bool = False) -> tuple[uuid.UUID, uuid.UUID]:
         storage = get_storage_backend()
@@ -147,6 +196,9 @@ class TranscriptionJobTests(unittest.TestCase):
         with patch(
             "app.jobs.transcribe_audio_bytes",
             return_value=TranscriptionResult(text="updated text should not replace title", language_code="en"),
+        ), patch(
+            "app.jobs.classify_transcript",
+            side_effect=RuntimeError("indexing unavailable"),
         ):
             run_transcription_job(str(entry_id), str(audio_asset_id))
 

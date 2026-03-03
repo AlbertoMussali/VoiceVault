@@ -18,6 +18,7 @@ from app.db import get_sessionmaker, reset_engine_cache
 from app.main import create_app
 from app.models import AuditLog, AudioAsset, Entry, User
 from app.settings import get_settings
+from app.storage import get_storage_backend
 
 
 class _BrokenStorage:
@@ -38,6 +39,7 @@ class EntryAudioUploadTests(unittest.TestCase):
 
         get_settings.cache_clear()
         reset_engine_cache()
+        get_storage_backend.cache_clear()
 
         self.client = TestClient(create_app())
         self.client.get("/health")
@@ -63,6 +65,7 @@ class EntryAudioUploadTests(unittest.TestCase):
         self.temp_dir.cleanup()
         get_settings.cache_clear()
         reset_engine_cache()
+        get_storage_backend.cache_clear()
 
     def _create_user_and_entry(self) -> uuid.UUID:
         session = get_sessionmaker()()
