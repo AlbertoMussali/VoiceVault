@@ -31,9 +31,14 @@ router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 profile_router = APIRouter(prefix="/api/v1", tags=["auth"])
 
 
-class CredentialsRequest(BaseModel):
+class SignupRequest(BaseModel):
     email: str
     password: str = Field(min_length=8, max_length=128)
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str = Field(min_length=1, max_length=128)
 
 
 class TokenRequest(BaseModel):
@@ -117,7 +122,7 @@ def _resolve_refresh_token(payload: TokenRequest | None, request: Request, setti
 
 @router.post("/signup", response_model=AuthTokensResponse, status_code=status.HTTP_201_CREATED)
 def signup(
-    payload: CredentialsRequest,
+    payload: SignupRequest,
     response: Response,
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
@@ -145,7 +150,7 @@ def signup(
 
 @router.post("/login", response_model=AuthTokensResponse)
 def login(
-    payload: CredentialsRequest,
+    payload: LoginRequest,
     response: Response,
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),

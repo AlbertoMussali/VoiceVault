@@ -33,7 +33,7 @@ export function AskSummaryRenderer({ sentences, citationsBySnippetId, onOpenCita
           .filter((citation): citation is AskSummaryCitation => Boolean(citation));
 
         return (
-          <li key={sentence.id} className="rounded-md border bg-muted/10 p-3">
+          <li key={sentence.id} className="border border-foreground bg-muted/10 p-3">
             <p className="text-sm leading-6">{sentence.text}</p>
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <span className="text-xs text-muted-foreground">Evidence:</span>
@@ -52,7 +52,7 @@ export function AskSummaryRenderer({ sentences, citationsBySnippetId, onOpenCita
                   </Button>
                 ))
               ) : (
-                <span className="text-xs text-destructive">Missing citation mapping</span>
+                <span className="text-xs italic text-foreground">Missing citation mapping</span>
               )}
             </div>
           </li>

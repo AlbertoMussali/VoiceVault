@@ -14,6 +14,7 @@ export default function App() {
       <Route path="/signup" element={<SignupPage />} />
       <Route element={<ProtectedRoute />}>
         <Route path="/app" element={<AppPage />} />
+        <Route path="/app/settings" element={<AppPage />} />
         <Route path="/app/audit" element={<AuditLogPage />} />
         <Route path="/app/entries/:entryId" element={<EntryDetailPage />} />
       </Route>

@@ -84,22 +84,24 @@ export function AuditLogPage() {
   }, [page, reloadToken]);
 
   return (
-    <main className="min-h-screen bg-gradient-to-br from-amber-50 via-orange-50 to-rose-100 p-6">
-      <section className="mx-auto mt-12 w-full max-w-4xl rounded-lg border bg-card p-8 text-card-foreground shadow-sm">
+    <main className="mono-page">
+      <section className="mono-shell">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <h1 className="text-2xl font-semibold tracking-tight">Audit Log</h1>
-            <p className="mt-2 text-sm text-muted-foreground">Review processing history and data operation events.</p>
-            <p className="mt-1 text-xs text-muted-foreground">Content is excluded from this history by design.</p>
+            <p className="mono-kicker">Security Ledger</p>
+            <h1 className="mt-2 font-display text-5xl leading-none tracking-[-0.05em] md:text-7xl">AUDIT</h1>
+            <p className="mt-3 text-sm text-muted-foreground">Review processing history and data operation events.</p>
+            <p className="mt-1 text-xs uppercase tracking-[0.1em] text-muted-foreground">Content is excluded from this history by design.</p>
           </div>
           <Button variant="outline" onClick={() => navigate('/app')}>
-            Back to app
+            Back to app →
           </Button>
         </div>
 
-        <div className="mt-6 rounded-md border bg-background p-4">
+        <div className="mono-rule" />
+        <div className="mono-section">
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <p className="text-sm text-muted-foreground">
+            <p className="text-sm uppercase tracking-[0.1em] text-muted-foreground">
               Page {page}
               {total !== null ? ` • ${total} total event${total === 1 ? '' : 's'}` : ''}
             </p>
@@ -117,7 +119,7 @@ export function AuditLogPage() {
           </div>
 
           {isLoading ? <p className="mt-4 text-sm text-muted-foreground">Loading audit events...</p> : null}
-          {errorMessage ? <p className="mt-4 text-sm text-destructive">{errorMessage}</p> : null}
+          {errorMessage ? <p className="mt-4 border-2 border-foreground px-3 py-2 text-sm italic">{errorMessage}</p> : null}
 
           {!isLoading && !errorMessage && events.length === 0 ? (
             <p className="mt-4 text-sm text-muted-foreground">No audit events found for this page.</p>
@@ -130,20 +132,20 @@ export function AuditLogPage() {
                 const path = readMetadataValue(event, 'path');
                 const statusCode = readMetadataValue(event, 'status_code');
                 return (
-                  <article key={event.id} className="rounded-md border p-3">
+                  <article key={event.id} className="border border-foreground p-4 transition-colors duration-100 hover:bg-foreground hover:text-background">
                     <div className="flex flex-wrap items-start justify-between gap-2">
                       <div className="space-y-1">
-                        <p className="text-sm font-semibold">{formatEventLabel(event.eventType)}</p>
+                        <p className="text-sm font-semibold uppercase tracking-[0.08em]">{formatEventLabel(event.eventType)}</p>
                         <p className="text-xs text-muted-foreground">{formatAuditDate(event.createdAt)}</p>
                       </div>
-                      <span className="rounded-full bg-secondary px-2 py-1 text-xs">ID: {event.id}</span>
+                      <span className="border border-foreground px-2 py-1 text-xs font-mono">ID: {event.id}</span>
                     </div>
                     <div className="mt-3 flex flex-wrap gap-2 text-xs">
-                      {method ? <span className="rounded-full bg-slate-100 px-2 py-1 text-slate-700">Method: {method}</span> : null}
-                      {path ? <span className="rounded-full bg-slate-100 px-2 py-1 text-slate-700">Path: {path}</span> : null}
-                      {statusCode ? <span className="rounded-full bg-slate-100 px-2 py-1 text-slate-700">Status: {statusCode}</span> : null}
-                      {event.entryId ? <span className="rounded-full bg-slate-100 px-2 py-1 text-slate-700">Entry: {event.entryId}</span> : null}
-                      {event.userId ? <span className="rounded-full bg-slate-100 px-2 py-1 text-slate-700">User: {event.userId}</span> : null}
+                      {method ? <span className="border border-current px-2 py-1">Method: {method}</span> : null}
+                      {path ? <span className="border border-current px-2 py-1">Path: {path}</span> : null}
+                      {statusCode ? <span className="border border-current px-2 py-1">Status: {statusCode}</span> : null}
+                      {event.entryId ? <span className="border border-current px-2 py-1">Entry: {event.entryId}</span> : null}
+                      {event.userId ? <span className="border border-current px-2 py-1">User: {event.userId}</span> : null}
                     </div>
                   </article>
                 );

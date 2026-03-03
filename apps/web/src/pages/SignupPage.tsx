@@ -33,15 +33,23 @@ export function SignupPage() {
   }
 
   return (
-    <main className="min-h-screen bg-gradient-to-br from-sky-50 via-cyan-50 to-emerald-100 p-6">
-      <section className="mx-auto mt-12 w-full max-w-md rounded-lg border bg-card p-8 text-card-foreground shadow-sm">
-        <h1 className="text-2xl font-semibold tracking-tight">Create account</h1>
-        <p className="mt-2 text-sm text-muted-foreground">Start capturing and searching your voice notes.</p>
+    <main className="mono-page">
+      <a href="#signup-content" className="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:bg-foreground focus:px-4 focus:py-3 focus:text-background">
+        Skip to signup form
+      </a>
+      <section id="signup-content" className="mono-shell max-w-4xl">
+        <p className="mono-kicker">VoiceVault Enrollment</p>
+        <h1 className="mt-3 font-display text-5xl leading-none tracking-[-0.05em] md:text-7xl">REGISTER</h1>
+        <div className="mt-6 flex items-center gap-4">
+          <div className="h-2 w-24 bg-foreground" />
+          <div className="h-4 w-4 border-2 border-foreground" />
+        </div>
+        <p className="mono-dropcap mt-8 text-lg leading-relaxed">Start capturing and searching your voice notes.</p>
         <form className="mt-6 space-y-4" onSubmit={handleSubmit}>
-          <label className="block text-sm font-medium text-foreground">
+          <label className="block text-sm font-medium uppercase tracking-[0.1em] text-foreground">
             Email
             <input
-              className="mt-1 h-10 w-full rounded-md border bg-background px-3 text-sm outline-none ring-offset-background placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring"
+              className="mt-2 h-11 w-full px-3 text-sm outline-none"
               type="email"
               autoComplete="email"
               value={email}
@@ -49,10 +57,10 @@ export function SignupPage() {
               required
             />
           </label>
-          <label className="block text-sm font-medium text-foreground">
+          <label className="block text-sm font-medium uppercase tracking-[0.1em] text-foreground">
             Password
             <input
-              className="mt-1 h-10 w-full rounded-md border bg-background px-3 text-sm outline-none ring-offset-background placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring"
+              className="mt-2 h-11 w-full px-3 text-sm outline-none"
               type="password"
               autoComplete="new-password"
               minLength={8}
@@ -61,14 +69,14 @@ export function SignupPage() {
               required
             />
           </label>
-          {error ? <p className="text-sm text-destructive">{error}</p> : null}
+          {error ? <p className="border-2 border-foreground px-3 py-2 text-sm italic">{error}</p> : null}
           <Button type="submit" className="w-full" disabled={isSubmitting}>
             {isSubmitting ? 'Creating account...' : 'Create account'}
           </Button>
         </form>
-        <p className="mt-4 text-sm text-muted-foreground">
+        <p className="mt-5 border-t border-foreground pt-4 text-sm text-muted-foreground">
           Already have an account?{' '}
-          <Link className="font-medium text-primary underline-offset-2 hover:underline" to="/login">
+          <Link className="font-medium text-foreground underline decoration-1 underline-offset-2 hover:no-underline focus-visible:outline focus-visible:outline-3 focus-visible:outline-foreground focus-visible:outline-offset-2" to="/login">
             Log in
           </Link>
           .

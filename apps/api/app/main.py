@@ -12,7 +12,8 @@ from starlette.responses import Response
 
 from app.audit import AuditLoggingMiddleware
 from app.auth import authorize_entries_request
-from app.db import initialize_schema
+from app.db import get_sessionmaker, initialize_schema
+from app.demo_seed import seed_demo_account_data
 from app.errors import ApiContractError
 from app.observability import configure_logging, report_backend_exception, request_context_fields
 from app.routers.auth import profile_router, router as auth_router
@@ -35,6 +36,13 @@ request_logger = logging.getLogger("voicevault.request")
 def create_app(audit_session_factory: sessionmaker[Session] | None = None) -> FastAPI:
     configure_logging()
     settings = get_settings()
+    if settings.database_url.startswith("sqlite"):
+        # TestClient usage may skip startup lifespan hooks unless entered as a
+        # context manager, so initialize sqlite schemas eagerly.
+        initialize_schema()
+        if settings.demo_seed_enabled:
+            with get_sessionmaker()() as session:
+                seed_demo_account_data(session, settings)
     app = FastAPI(title="VoiceVault API", version=settings.api_version)
     app.add_middleware(
         CORSMiddleware,
@@ -58,10 +66,9 @@ def create_app(audit_session_factory: sessionmaker[Session] | None = None) -> Fa
 
     @app.on_event("startup")
     def startup() -> None:
-        # The MVP uses Postgres + Alembic for real environments. For unit tests, we
-        # run against SQLite and create tables from SQLAlchemy metadata.
-        if settings.database_url.startswith("sqlite"):
-            initialize_schema()
+        if settings.demo_seed_enabled and not settings.database_url.startswith("sqlite"):
+            with get_sessionmaker()() as session:
+                seed_demo_account_data(session, settings)
 
     @app.middleware("http")
     async def entry_authorization_middleware(request: Request, call_next) -> Response:

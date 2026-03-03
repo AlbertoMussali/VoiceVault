@@ -329,10 +329,13 @@ export function EntryDetailPage() {
   }
 
   return (
-    <main className="min-h-screen bg-gradient-to-br from-sky-50 via-cyan-50 to-emerald-100 p-6">
-      <section className="mx-auto mt-12 w-full max-w-3xl rounded-lg border bg-card p-8 text-card-foreground shadow-sm">
+    <main className="mono-page">
+      <section className="mono-shell">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <h1 className="text-2xl font-semibold tracking-tight">Entry Detail</h1>
+          <div>
+            <p className="mono-kicker">Transcript Evidence</p>
+            <h1 className="mt-2 font-display text-5xl leading-none tracking-[-0.05em] md:text-7xl">ENTRY</h1>
+          </div>
           <div className="flex flex-wrap gap-2">
             {entry && !errorMessage ? (
               <Button
@@ -341,38 +344,34 @@ export function EntryDetailPage() {
                   setIsDeleteModalOpen(true);
                 }}
                 variant="outline"
-                className="border-destructive/50 text-destructive hover:bg-destructive/10 hover:text-destructive"
               >
                 Delete entry
               </Button>
             ) : null}
             <Button onClick={() => navigate('/app')} variant="outline">
-              Back to app
+              Back to app →
             </Button>
           </div>
         </div>
 
+        <div className="mono-rule" />
         {isLoading ? <p className="mt-4 text-sm text-muted-foreground">Loading entry...</p> : null}
 
         {errorMessage ? (
-          <p className="mt-4 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">{errorMessage}</p>
+          <p className="mt-4 border-2 border-foreground px-3 py-2 text-sm italic">{errorMessage}</p>
         ) : null}
 
         {entry && !errorMessage ? (
           <>
-            <dl className="mt-6 rounded-md border bg-background p-4 text-sm">
+            <dl className="mono-section mt-6 text-sm">
               <div className="flex flex-wrap justify-between gap-3">
-                <dt className="text-muted-foreground">Entry ID</dt>
-                <dd className="font-mono text-xs sm:text-sm">{entry.entryId}</dd>
-              </div>
-              <div className="mt-3 flex flex-wrap justify-between gap-3">
                 <dt className="text-muted-foreground">Status</dt>
                 <dd className="font-medium capitalize">{formatStatus(entry.status)}</dd>
               </div>
             </dl>
 
-            <section className="mt-6 rounded-md border bg-background p-4">
-              <h2 className="text-base font-semibold">Audio</h2>
+            <section className="mono-section mt-6">
+              <h2 className="text-3xl font-semibold leading-none tracking-tight">Audio</h2>
               {audioState.src ? (
                 <audio controls className="mt-3 w-full" src={audioState.src} preload="metadata" />
               ) : (
@@ -380,9 +379,9 @@ export function EntryDetailPage() {
               )}
             </section>
 
-            <section className="mt-6 rounded-md border bg-background p-4">
+            <section className="mono-section mt-6">
               <div className="flex flex-wrap items-center justify-between gap-3">
-                <h2 className="text-base font-semibold">Transcript</h2>
+                <h2 className="text-3xl font-semibold leading-none tracking-tight">Transcript</h2>
                 <Button onClick={handleAddToBrag} disabled={!activeSnippet} size="sm" variant="outline">
                   Add to Brag
                 </Button>
@@ -410,7 +409,7 @@ export function EntryDetailPage() {
                       {transcriptText.slice(0, clampedHighlightRange.start)}
                       <span
                         ref={highlightRef}
-                        className="rounded bg-amber-200/90 px-0.5 text-foreground shadow-[0_0_0_2px_rgba(245,158,11,0.25)]"
+                        className="bg-foreground px-1 text-background"
                       >
                         {transcriptText.slice(clampedHighlightRange.start, clampedHighlightRange.end)}
                       </span>
@@ -423,8 +422,8 @@ export function EntryDetailPage() {
               ) : (
                 <p className="mt-3 text-sm text-muted-foreground">Transcript is not available yet for this entry.</p>
               )}
-              {bragNotice ? <p className="mt-3 text-sm text-emerald-700">{bragNotice}</p> : null}
-              {bragError ? <p className="mt-3 text-sm text-destructive">{bragError}</p> : null}
+              {bragNotice ? <p className="mt-3 border border-foreground px-3 py-2 text-sm">{bragNotice}</p> : null}
+              {bragError ? <p className="mt-3 border border-foreground px-3 py-2 text-sm italic">{bragError}</p> : null}
             </section>
           </>
         ) : null}
@@ -435,16 +434,16 @@ export function EntryDetailPage() {
             role="dialog"
             aria-modal="true"
             aria-labelledby="delete-entry-title"
-            className="w-full max-w-lg rounded-lg border bg-card p-6 text-card-foreground shadow-lg"
+            className="w-full max-w-lg border-2 border-foreground bg-card p-6 text-card-foreground"
           >
-            <h2 id="delete-entry-title" className="text-lg font-semibold text-destructive">
+            <h2 id="delete-entry-title" className="text-3xl font-semibold tracking-tight">
               Delete entry permanently?
             </h2>
             <p className="mt-2 text-sm text-muted-foreground">
               This action is irreversible. Audio, transcript versions, and linked evidence will be removed.
             </p>
-            <p className="mt-2 rounded-md border bg-muted/20 p-2 text-xs font-mono">{entry.entryId}</p>
-            {deleteError ? <p className="mt-3 text-sm text-destructive">{deleteError}</p> : null}
+            <p className="mt-2 border border-foreground bg-muted/20 p-2 text-xs font-mono">{entry.entryId}</p>
+            {deleteError ? <p className="mt-3 border border-foreground px-3 py-2 text-sm italic">{deleteError}</p> : null}
             <div className="mt-5 flex flex-wrap justify-end gap-2">
               <Button
                 variant="outline"
@@ -464,7 +463,7 @@ export function EntryDetailPage() {
                   void handleConfirmDelete();
                 }}
                 disabled={isDeletingEntry}
-                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                className="bg-foreground text-background hover:bg-background hover:text-foreground"
               >
                 {isDeletingEntry ? 'Deleting...' : 'Yes, delete entry'}
               </Button>
