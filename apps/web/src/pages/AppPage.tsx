@@ -79,6 +79,7 @@ const ASK_TEMPLATES = [
   { label: 'Commitments', query: 'What did I say I would do next?' },
   { label: 'Themes', query: 'What themes are repeating lately?' }
 ] as const;
+const DEFAULT_ASK_TEMPLATE_QUERY = ASK_TEMPLATES[0].query;
 const MAX_QUOTE_CHARS = 160;
 const BRAG_BUCKETS = ['Impact', 'Execution', 'Leadership', 'Collaboration', 'Growth'] as const;
 const BRAG_UNASSIGNED_BUCKET = 'Unassigned';
@@ -676,7 +677,7 @@ export function AppPage() {
   const [isSearchLoading, setIsSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
-  const [askQueryInput, setAskQueryInput] = useState('');
+  const [askQueryInput, setAskQueryInput] = useState<string>(DEFAULT_ASK_TEMPLATE_QUERY);
   const [submittedAskQuery, setSubmittedAskQuery] = useState('');
   const [askDateFrom, setAskDateFrom] = useState('');
   const [askDateTo, setAskDateTo] = useState('');
@@ -687,6 +688,7 @@ export function AppPage() {
   const [askSummarySentences, setAskSummarySentences] = useState<AskSummarySentence[]>([]);
   const [askSummaryError, setAskSummaryError] = useState<string | null>(null);
   const [askQuestionInput, setAskQuestionInput] = useState('');
+  const hasAutoStartedAskRef = useRef(false);
   const [isWhatGetsSentModalOpen, setIsWhatGetsSentModalOpen] = useState(false);
   const [askPreviewOptions, setAskPreviewOptions] = useState<AskPreviewOptions>({
     redact: true,
@@ -793,6 +795,15 @@ export function AppPage() {
 
     setAskQuestionInput((previous) => (previous.trim().length > 0 ? previous : submittedSearchQuery));
   }, [submittedSearchQuery]);
+
+  useEffect(() => {
+    if (isSettingsPage || hasAutoStartedAskRef.current) {
+      return;
+    }
+    hasAutoStartedAskRef.current = true;
+    setSubmittedAskQuery(DEFAULT_ASK_TEMPLATE_QUERY);
+    void runAskFlow(DEFAULT_ASK_TEMPLATE_QUERY);
+  }, [isSettingsPage]);
 
   useEffect(() => {
     writeOnboardingDismissed(onboardingDismissed);
@@ -2465,16 +2476,21 @@ export function AppPage() {
                   Summarized from all matched transcript snippets for this query and date range.
                 </p>
                 <div className="mt-3">
-                  <AskSummaryRenderer
-                    sentences={askSummarySentences}
-                    citationsBySnippetId={askSummaryCitationsBySnippetId}
-                    onOpenCitation={openAskCitation}
-                  />
+                  {askSummarySentences.length > 0 ? (
+                    <AskSummaryRenderer
+                      sentences={askSummarySentences}
+                      citationsBySnippetId={askSummaryCitationsBySnippetId}
+                      onOpenCitation={openAskCitation}
+                    />
+                  ) : isAskLoading ? (
+                    <p className="text-sm text-muted-foreground">Building summary...</p>
+                  ) : hasAskAttempt && filteredAskSources.length === 0 ? (
+                    <p className="text-sm text-muted-foreground">No matched notes in the selected range yet.</p>
+                  ) : (
+                    <p className="text-sm text-muted-foreground">Summary is not ready yet. Try running the query again.</p>
+                  )}
                 </div>
               </div>
-              {hasAskAttempt && !isAskLoading && !askError && filteredAskSources.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No sources found for "{submittedAskQuery}" in the selected range.</p>
-              ) : null}
             </div>
           </article>
             </section>
