@@ -33,7 +33,8 @@ def generate_summary_sentences(*, query_text: str, sources: list[dict[str, Any]]
                     "You summarize user-provided sources. "
                     "Output JSON only with key 'sentences' as an array. "
                     "Each item must be an object with non-empty 'text' and non-empty 'snippet_ids' array. "
-                    "Only use snippet IDs from provided sources."
+                    "Only use snippet IDs from provided sources. "
+                    "Return between 3 and 5 concise sentences."
                 ),
             },
             {
@@ -103,5 +104,9 @@ def generate_summary_sentences(*, query_text: str, sources: list[dict[str, Any]]
 
     if not normalized:
         raise RuntimeError("OpenAI summary produced no sentences")
+    if len(normalized) < 3:
+        raise RuntimeError("OpenAI summary must return at least 3 sentences")
+    if len(normalized) > 5:
+        normalized = normalized[:5]
 
     return normalized

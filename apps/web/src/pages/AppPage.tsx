@@ -5,7 +5,7 @@ import { useAuth } from '@/auth/AuthProvider';
 import { AskSummaryRenderer, type AskSummaryCitation, type AskSummarySentence } from '@/components/AskSummaryRenderer';
 import { Button } from '@/components/ui/Button';
 import { deleteAccount } from '@/lib/account';
-import { summarizeAskQuery, submitAskQuery, type AskSource } from '@/lib/ask';
+import { summarizeAskQuery, submitAskQuery, type AskSource, type AskSummaryResult } from '@/lib/ask';
 import { listBragDrafts, updateBragDraft, type BragDraft } from '@/lib/bragDrafts';
 import {
   downloadBragExportArtifact,
@@ -87,7 +87,7 @@ const BRAG_EXPORT_FAILED_STATUSES = new Set(['failed', 'error']);
 const DATA_EXPORT_READY_STATUSES = new Set(['completed', 'ready', 'done']);
 const DATA_EXPORT_FAILED_STATUSES = new Set(['failed', 'error', 'fatal']);
 const SENSITIVE_TAG_TOKENS = new Set(['sensitive', 'work_sensitive', 'work-sensitive', 'confidential', 'private', 'raw_only', 'raw-only']);
-const ASK_SUMMARY_SENTENCE_LIMIT = 4;
+const ASK_SUMMARY_SENTENCE_LIMIT = 5;
 const DELETE_ACCOUNT_CONFIRMATION_TEXT = 'DELETE MY ACCOUNT';
 const TIMELINE_WINDOW_OPTIONS: TimelineWindow[] = ['all', '1y', '6m', '1m', '1w', '1d'];
 
@@ -189,6 +189,62 @@ function formatBragDate(raw: string): string {
   }
 
   return date.toLocaleDateString();
+}
+
+function normalizeSnippetKey(text: string): string {
+  return text
+    .replace(/\s+/g, ' ')
+    .replace(/[^\w\s]/g, '')
+    .trim()
+    .toLowerCase();
+}
+
+function inferIndexingGuess(params: {
+  transcriptText?: string | null;
+  title?: string | null;
+  existingTags?: string[];
+  sentimentLabel?: string | null;
+}): EntryIndexingData {
+  const text = `${params.title ?? ''} ${params.transcriptText ?? ''}`.toLowerCase();
+  const keywordTagMap: Record<string, string> = {
+    incident: 'incident',
+    outage: 'incident',
+    bug: 'debugging',
+    deploy: 'shipping',
+    shipped: 'shipping',
+    customer: 'customer',
+    retro: 'retro',
+    planning: 'planning',
+    onboarding: 'onboarding',
+    quality: 'quality',
+    search: 'search'
+  };
+
+  const hasAny = (tokens: string[]) => tokens.some((token) => text.includes(token));
+  const type: string = hasAny(['incident', 'blocker', 'blocked', 'issue', 'error', 'bug', 'outage'])
+    ? 'blocker'
+    : hasAny(['learned', 'lesson', 'realized', 'insight'])
+      ? 'learning'
+      : hasAny(['idea', 'proposal', 'experiment', 'hypothesis'])
+        ? 'idea'
+        : hasAny(['todo', 'task', 'follow up', 'next step'])
+          ? 'task'
+          : hasAny(['shipped', 'completed', 'win', 'success', 'delivered'])
+            ? 'win'
+            : params.sentimentLabel === 'negative'
+              ? 'blocker'
+              : params.sentimentLabel === 'positive'
+                ? 'win'
+                : 'task';
+
+  const context: EntryContext = hasAny(['family', 'health', 'home', 'personal', 'life']) ? 'life' : 'work';
+
+  const guessedTags = Object.entries(keywordTagMap)
+    .filter(([keyword]) => text.includes(keyword))
+    .map(([, tag]) => tag);
+  const mergedTags = Array.from(new Set([...(params.existingTags ?? []), ...guessedTags])).slice(0, 8);
+
+  return { type, context, tags: mergedTags };
 }
 
 function readStoredIndexing(): Record<string, EntryIndexingData> {
@@ -645,6 +701,7 @@ export function AppPage() {
   const transcriptStreamTimerRef = useRef<number | null>(null);
   const bragExportPollTimerRef = useRef<number | null>(null);
   const dataExportPollTimerRef = useRef<number | null>(null);
+  const indexingModalEntryRef = useRef<string | null>(null);
 
   useEffect(() => {
     return () => {
@@ -897,16 +954,50 @@ export function AppPage() {
   }
 
   function openIndexingModal(targetEntryId: string) {
+    indexingModalEntryRef.current = targetEntryId;
     const existing = indexingByEntry[targetEntryId];
     if (existing) {
       setIndexType(existing.type);
       setIndexContext(existing.context);
       setIndexTagsInput(existing.tags.join(', '));
     } else {
-      resetIndexingDraft();
+      const timelineEntry = timelineByEntry[targetEntryId];
+      const guess = inferIndexingGuess({
+        title: timelineEntry?.title ?? null,
+        transcriptText: timelineEntry?.quote ?? null,
+        existingTags: timelineEntry?.tags ?? [],
+        sentimentLabel: timelineEntry?.sentimentLabel ?? null
+      });
+      setIndexType(guess.type);
+      setIndexContext(guess.context);
+      setIndexTagsInput(guess.tags.join(', '));
     }
 
     setIsIndexingModalOpen(true);
+
+    if (existing) {
+      return;
+    }
+
+    void (async () => {
+      try {
+        const detail = await fetchEntryDetail(targetEntryId);
+        if (indexingModalEntryRef.current !== targetEntryId) {
+          return;
+        }
+        const refinedGuess = inferIndexingGuess({
+          title: detail.title,
+          transcriptText: detail.transcriptText,
+          existingTags: detail.tags,
+          sentimentLabel: detail.sentimentLabel
+        });
+        setIndexType((previous) => (previous ? previous : refinedGuess.type));
+        setIndexContext((previous) => (previous ? previous : refinedGuess.context));
+        setIndexTagsInput((previous) => (previous.trim().length > 0 ? previous : refinedGuess.tags.join(', ')));
+      } catch {
+        // Best-effort refinement only; fallback guesses already shown.
+      }
+    })();
   }
 
   async function handleLogout() {
@@ -1045,20 +1136,7 @@ export function AppPage() {
       const askQuery = await submitAskQuery(query, SEARCH_RESULT_LIMIT);
       setAskQueryId(askQuery.queryId);
       setAskSources(askQuery.sources);
-
-      try {
-        const summary = await summarizeAskQuery(askQuery.queryId);
-        setAskSummarySentences(
-          summary.sentences.slice(0, ASK_SUMMARY_SENTENCE_LIMIT).map((sentence, index) => ({
-            id: `${summary.queryId}-${index}`,
-            text: sentence.text,
-            citationSnippetIds: sentence.snippetIds
-          }))
-        );
-      } catch (error) {
-        setAskSummarySentences([]);
-        setAskSummaryError(error instanceof Error ? error.message : 'Ask summary generation failed.');
-      }
+      setAskSummarySentences([]);
     } catch (error) {
       setAskError(error instanceof Error ? error.message : 'Ask retrieval failed.');
       setAskSources([]);
@@ -1067,6 +1145,14 @@ export function AppPage() {
     } finally {
       setIsAskLoading(false);
     }
+  }
+
+  function mapAskSummary(summary: AskSummaryResult): AskSummarySentence[] {
+    return summary.sentences.slice(0, ASK_SUMMARY_SENTENCE_LIMIT).map((sentence, index) => ({
+      id: `${summary.queryId}-${index}`,
+      text: sentence.text,
+      citationSnippetIds: sentence.snippetIds
+    }));
   }
 
   async function handleAskSubmit(event: FormEvent<HTMLFormElement>) {
@@ -1386,6 +1472,7 @@ export function AppPage() {
   }
 
   function handleSkipIndexing() {
+    indexingModalEntryRef.current = null;
     setIsIndexingModalOpen(false);
     resetIndexingDraft();
   }
@@ -1416,6 +1503,7 @@ export function AppPage() {
       tags: parsedTags
     });
     setTranscriptNotice('Saved quick indexing.');
+    indexingModalEntryRef.current = null;
     setIsIndexingModalOpen(false);
   }
 
@@ -1916,9 +2004,8 @@ export function AppPage() {
   }, [bragDraftsInRange]);
   const hasSearchAttempt = useMemo(() => submittedSearchQuery.length > 0, [submittedSearchQuery]);
   const hasAskAttempt = useMemo(() => submittedAskQuery.length > 0, [submittedAskQuery]);
-  const filteredAskSources = useMemo(
-    () =>
-      askSources.filter((source) => {
+  const filteredAskSources = useMemo(() => {
+    const dateFiltered = askSources.filter((source) => {
         const timelineEntry = timelineByEntry[source.entryId];
         if (!timelineEntry) {
           return !askDateFrom && !askDateTo;
@@ -1937,9 +2024,55 @@ export function AppPage() {
         }
 
         return true;
-      }),
-    [askDateFrom, askDateTo, askSources, timelineByEntry]
-  );
+      });
+
+    const seen = new Set<string>();
+    return dateFiltered.filter((source) => {
+      const key = normalizeSnippetKey(source.snippetText);
+      if (!key) {
+        return true;
+      }
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    });
+  }, [askDateFrom, askDateTo, askSources, timelineByEntry]);
+  const filteredAskSnippetIds = useMemo(() => filteredAskSources.map((source) => source.snippetId), [filteredAskSources]);
+  useEffect(() => {
+    if (!askQueryId) {
+      return;
+    }
+
+    if (filteredAskSnippetIds.length === 0) {
+      setAskSummarySentences([]);
+      setAskSummaryError(null);
+      return;
+    }
+
+    let cancelled = false;
+    setAskSummaryError(null);
+    void (async () => {
+      try {
+        const summary = await summarizeAskQuery(askQueryId, filteredAskSnippetIds);
+        if (cancelled) {
+          return;
+        }
+        setAskSummarySentences(mapAskSummary(summary));
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+        setAskSummarySentences([]);
+        setAskSummaryError(error instanceof Error ? error.message : 'Ask summary generation failed.');
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [askQueryId, filteredAskSnippetIds]);
   const askSourcesForPreview = useMemo(() => {
     return filteredAskSources
       .map((result) => {
@@ -2322,39 +2455,15 @@ export function AppPage() {
               </div>
               {askError ? <p className="text-sm text-foreground">{askError}</p> : null}
               {askSummaryError ? <p className="text-sm text-foreground">{askSummaryError}</p> : null}
-              {isAskLoading ? <p className="text-sm text-muted-foreground">Loading sources...</p> : null}
-              {filteredAskSources.length > 0 ? (
-                <div className="space-y-3">
-                  {filteredAskSources.map((source) => {
-                    const sourceDate = timelineByEntry[source.entryId]?.occurredAt ?? timelineByEntry[source.entryId]?.createdAt;
-                    const citation: AskSummaryCitation = {
-                      snippetId: source.snippetId,
-                      entryId: source.entryId,
-                      startChar: source.startChar,
-                      endChar: source.endChar,
-                      snippetText: source.snippetText
-                    };
-                    return (
-                      <article key={source.snippetId} className="border border-foreground p-3">
-                        <p className="text-xs text-muted-foreground">{sourceDate ? formatTimelineDate(sourceDate) : 'Unknown date'}</p>
-                        <p className="mt-2 text-sm">{source.snippetText}</p>
-                        <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-                          <span />
-                          <Button size="sm" variant="outline" onClick={() => openAskCitation(citation)}>
-                            Explore this Day
-                          </Button>
-                        </div>
-                      </article>
-                    );
-                  })}
-                </div>
-              ) : null}
+              {isAskLoading ? <p className="text-sm text-muted-foreground">Building AI summary...</p> : null}
               <div className="border border-foreground bg-muted/20 p-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <h3 className="text-sm font-semibold">Summary</h3>
-                  <span className="text-xs text-muted-foreground">Per-sentence citations</span>
+                  <h3 className="text-sm font-semibold">AI Summary</h3>
+                  <span className="text-xs text-muted-foreground">3-5 sentences</span>
                 </div>
-                <p className="mt-1 text-xs text-muted-foreground">Every summary sentence includes clickable evidence that jumps to transcript highlights.</p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Summarized from all matched transcript snippets for this query and date range.
+                </p>
                 <div className="mt-3">
                   <AskSummaryRenderer
                     sentences={askSummarySentences}
@@ -2365,61 +2474,6 @@ export function AppPage() {
               </div>
               {hasAskAttempt && !isAskLoading && !askError && filteredAskSources.length === 0 ? (
                 <p className="text-sm text-muted-foreground">No sources found for "{submittedAskQuery}" in the selected range.</p>
-              ) : null}
-            </div>
-
-            <div className="space-y-4 border-t-2 border-foreground pt-4">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <h3 className="text-2xl font-semibold leading-none tracking-tight">Search</h3>
-                <span className="text-xs text-muted-foreground">Transcript search with highlight jump</span>
-              </div>
-              <form onSubmit={handleSearchSubmit} className="flex flex-col gap-3 sm:flex-row">
-                <input
-                  type="search"
-                  value={searchQueryInput}
-                  onChange={(event) => setSearchQueryInput(event.target.value)}
-                  placeholder="Search transcripts..."
-                  className="h-10 w-full rounded-none border bg-background px-3 text-sm"
-                />
-                <Button type="submit" disabled={isSearchLoading} className="sm:w-auto">
-                  {isSearchLoading ? 'Searching...' : 'Search'}
-                </Button>
-              </form>
-              {searchError ? <p className="text-sm text-foreground">{searchError}</p> : null}
-              {isSearchLoading ? <p className="text-sm text-muted-foreground">Loading results...</p> : null}
-              {searchResults.length > 0 ? (
-                <div className="space-y-3">
-                  {searchResults.map((result, index) => (
-                    <article key={`${result.entryId}-${result.startChar}-${result.endChar}-${index}`} className="border border-foreground p-3">
-                      <p className="text-xs text-muted-foreground">Entry: {result.entryId}</p>
-                      <p className="mt-2 text-sm">{result.snippetText}</p>
-                      <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-                        <p className="text-xs text-muted-foreground">
-                          Offsets: {result.startChar}-{result.endChar}
-                        </p>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          onClick={() => {
-                            const params = new URLSearchParams({
-                              start: String(result.startChar),
-                              end: String(result.endChar)
-                            });
-                            if (submittedSearchQuery) {
-                              params.set('q', submittedSearchQuery);
-                            }
-                            navigate(`/app/entries/${result.entryId}?${params.toString()}`);
-                          }}
-                        >
-                          Open result
-                        </Button>
-                      </div>
-                    </article>
-                  ))}
-                </div>
-              ) : null}
-              {hasSearchAttempt && !isSearchLoading && !searchError && searchResults.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No matches found for "{submittedSearchQuery}".</p>
               ) : null}
             </div>
           </article>
@@ -3207,6 +3261,7 @@ export function AppPage() {
               Quick indexing
             </h2>
             <p className="mt-1 text-sm text-muted-foreground">Classify this transcript in under 5 seconds.</p>
+            <p className="mt-1 text-xs text-muted-foreground">Pre-filled with lightweight AI guesses. Edit before saving.</p>
 
             <div className="mt-5">
               <p className="text-sm font-medium">Type</p>
