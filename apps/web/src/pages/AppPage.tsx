@@ -21,10 +21,10 @@ import {
 } from '@/lib/dataExport';
 import {
   EntryApiError,
+  archiveEntry,
   createEntry,
   fetchEntriesTimeline,
   fetchEntryDetail,
-  fetchEntryStatus,
   searchEntries,
   type SearchResult,
   type TimelineEntry,
@@ -524,6 +524,25 @@ function mapRecordingStartError(error: unknown): string {
   return error.message || fallback;
 }
 
+function resolveRecordingFileExtension(mimeType: string | null | undefined): string {
+  if (!mimeType) {
+    return 'webm';
+  }
+
+  const normalized = mimeType.toLowerCase();
+  if (normalized.includes('mp4') || normalized.includes('m4a')) {
+    return 'm4a';
+  }
+  if (normalized.includes('ogg')) {
+    return 'ogg';
+  }
+  if (normalized.includes('wav')) {
+    return 'wav';
+  }
+
+  return 'webm';
+}
+
 export function AppPage() {
   const { user, logoutCurrentUser } = useAuth();
   const navigate = useNavigate();
@@ -553,11 +572,16 @@ export function AppPage() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [retryAction, setRetryAction] = useState<RetryAction>(null);
   const [entryTranscript, setEntryTranscript] = useState<string | null>(null);
+  const [captureTranscriptPreview, setCaptureTranscriptPreview] = useState('');
+  const [captureTranscriptFinalized, setCaptureTranscriptFinalized] = useState(false);
   const [transcriptVersion, setTranscriptVersion] = useState<number | null>(null);
   const [isTranscriptEdited, setIsTranscriptEdited] = useState(false);
   const [isEditingTranscript, setIsEditingTranscript] = useState(false);
   const [transcriptDraft, setTranscriptDraft] = useState('');
   const [isSavingTranscript, setIsSavingTranscript] = useState(false);
+  const [isArchivingEntry, setIsArchivingEntry] = useState(false);
+  const [archiveError, setArchiveError] = useState<string | null>(null);
+  const [archiveNotice, setArchiveNotice] = useState<string | null>(null);
   const [transcriptError, setTranscriptError] = useState<string | null>(null);
   const [transcriptNotice, setTranscriptNotice] = useState<string | null>(null);
   const [indexingByEntry, setIndexingByEntry] = useState<Record<string, EntryIndexingData>>(() => readStoredIndexing());
@@ -618,6 +642,7 @@ export function AppPage() {
   const [indexContext, setIndexContext] = useState<EntryContext | null>(null);
   const [indexTagsInput, setIndexTagsInput] = useState('');
   const pollTimerRef = useRef<number | null>(null);
+  const transcriptStreamTimerRef = useRef<number | null>(null);
   const bragExportPollTimerRef = useRef<number | null>(null);
   const dataExportPollTimerRef = useRef<number | null>(null);
 
@@ -641,6 +666,9 @@ export function AppPage() {
     () => () => {
       if (pollTimerRef.current !== null) {
         window.clearInterval(pollTimerRef.current);
+      }
+      if (transcriptStreamTimerRef.current !== null) {
+        window.clearInterval(transcriptStreamTimerRef.current);
       }
       if (bragExportPollTimerRef.current !== null) {
         window.clearInterval(bragExportPollTimerRef.current);
@@ -720,6 +748,54 @@ export function AppPage() {
     }
   }
 
+  function stopTranscriptStreaming() {
+    if (transcriptStreamTimerRef.current !== null) {
+      window.clearInterval(transcriptStreamTimerRef.current);
+      transcriptStreamTimerRef.current = null;
+    }
+  }
+
+  function streamTranscriptPreview(targetText: string, options?: { finalize?: boolean }): Promise<void> {
+    const normalized = targetText.trim();
+    if (!normalized) {
+      setCaptureTranscriptPreview('');
+      setCaptureTranscriptFinalized(options?.finalize === true);
+      return Promise.resolve();
+    }
+
+    stopTranscriptStreaming();
+
+    return new Promise((resolve) => {
+      transcriptStreamTimerRef.current = window.setInterval(() => {
+        setCaptureTranscriptPreview((previous) => {
+          const nextStart = previous.length;
+          if (nextStart >= normalized.length) {
+            stopTranscriptStreaming();
+            if (options?.finalize === true) {
+              setCaptureTranscriptFinalized(true);
+            }
+            resolve();
+            return normalized;
+          }
+
+          const remaining = normalized.length - nextStart;
+          const step = Math.max(3, Math.min(remaining, Math.ceil(normalized.length / 48)));
+          const next = normalized.slice(0, nextStart + step);
+          if (next.length >= normalized.length) {
+            stopTranscriptStreaming();
+            if (options?.finalize === true) {
+              setCaptureTranscriptFinalized(true);
+            }
+            resolve();
+            return normalized;
+          }
+
+          return next;
+        });
+      }, 36);
+    });
+  }
+
   function stopBragExportPolling() {
     if (bragExportPollTimerRef.current !== null) {
       window.clearInterval(bragExportPollTimerRef.current);
@@ -768,13 +844,18 @@ export function AppPage() {
   }
 
   function resetTranscriptState() {
+    stopTranscriptStreaming();
     setEntryTranscript(null);
+    setCaptureTranscriptPreview('');
+    setCaptureTranscriptFinalized(false);
     setTranscriptVersion(null);
     setIsTranscriptEdited(false);
     setIsEditingTranscript(false);
     setTranscriptDraft('');
     setTranscriptError(null);
     setTranscriptNotice(null);
+    setArchiveError(null);
+    setArchiveNotice(null);
   }
 
   async function refreshEntryDetail(targetEntryId: string) {
@@ -794,7 +875,7 @@ export function AppPage() {
     });
 
     if (!detail.transcript) {
-      return;
+      return detail;
     }
 
     setEntryTranscript(detail.transcript.text);
@@ -806,6 +887,7 @@ export function AppPage() {
       setTranscriptDraft(detail.transcript.text);
     }
     upsertTimelineEntry(targetEntryId, { quote: quoteFromTranscript(detail.transcript.text) });
+    return detail;
   }
 
   function resetIndexingDraft() {
@@ -901,6 +983,13 @@ export function AppPage() {
           }
           return URL.createObjectURL(blob);
         });
+        const extension = resolveRecordingFileExtension(blob.type || recordingMimeTypeRef.current);
+        const safeTimestamp = new Date().toISOString().replace(/:/g, '-');
+        const recordingFile = new File([blob], `capture-${safeTimestamp}.${extension}`, {
+          type: blob.type || 'audio/webm'
+        });
+        setSelectedFile(recordingFile);
+        void runUploadPipeline(recordingFile);
 
         setIsRecording(false);
       });
@@ -1034,16 +1123,38 @@ export function AppPage() {
     const poll = async (): Promise<boolean> => {
       try {
         pollAttempts += 1;
-        const result = await fetchEntryStatus(nextEntryId);
-        const normalized = normalizeStatus(result.status);
-        setEntryStatus(result.status ?? 'processing');
-        upsertTimelineEntry(nextEntryId, { status: result.status });
+        const detail = await fetchEntryDetail(nextEntryId);
+        const normalized = normalizeStatus(detail.status);
+        const detailStatus = detail.status ?? 'processing';
+        setEntryStatus(detailStatus);
+        upsertTimelineEntry(nextEntryId, {
+          status: detail.status,
+          title: detail.title ?? null,
+          type: detail.entryType ? detail.entryType.trim().toLowerCase() : null,
+          context: detail.context === 'work' || detail.context === 'life' ? detail.context : null,
+          tags: Array.from(new Set(detail.tags.map((tag) => tag.trim().toLowerCase()).filter((tag) => tag.length > 0))),
+          sentimentLabel: detail.sentimentLabel ? detail.sentimentLabel.trim().toLowerCase() : null,
+          sentimentScore: detail.sentimentScore
+        });
+
+        const latestTranscriptText = detail.transcript?.text ?? detail.transcriptText;
+        if (typeof latestTranscriptText === 'string' && latestTranscriptText.trim().length > 0) {
+          setEntryTranscript(latestTranscriptText);
+          void streamTranscriptPreview(latestTranscriptText, { finalize: false });
+        }
 
         if (READY_STATUSES.has(normalized)) {
-          setPipelineState('ready');
           setRetryAction(null);
           stopPolling();
-          await refreshEntryDetail(nextEntryId);
+          const refreshed = await refreshEntryDetail(nextEntryId);
+          const finalTranscript = refreshed.transcript?.text ?? refreshed.transcriptText;
+          if (typeof finalTranscript === 'string' && finalTranscript.trim().length > 0) {
+            setCaptureTranscriptFinalized(false);
+            await streamTranscriptPreview(finalTranscript, { finalize: true });
+          } else {
+            setCaptureTranscriptFinalized(true);
+          }
+          setPipelineState('ready');
           if (!indexingByEntry[nextEntryId]) {
             openIndexingModal(nextEntryId);
           }
@@ -1121,15 +1232,15 @@ export function AppPage() {
     setRetryAction(null);
   }
 
-  async function handleStartUpload(options?: { reuseCurrentEntry?: boolean }) {
-    if (!selectedFile) {
-      setErrorMessage('Pick an audio file first.');
-      return;
-    }
-
+  async function runUploadPipeline(audioFile: File, options?: { reuseCurrentEntry?: boolean }) {
     stopPolling();
     setErrorMessage(null);
     setRetryAction(null);
+    setArchiveError(null);
+    setArchiveNotice(null);
+    setCaptureTranscriptFinalized(false);
+    setCaptureTranscriptPreview('');
+    stopTranscriptStreaming();
 
     let currentEntryId = options?.reuseCurrentEntry ? entryId : null;
     let step: PipelineStep = 'creating';
@@ -1158,7 +1269,7 @@ export function AppPage() {
 
       step = 'uploading';
       setPipelineState('uploading');
-      await uploadEntryAudio(currentEntryId, selectedFile);
+      await uploadEntryAudio(currentEntryId, audioFile);
 
       step = 'polling';
       setPipelineState('transcribing');
@@ -1166,6 +1277,15 @@ export function AppPage() {
     } catch (error) {
       handlePipelineError(error, step, currentEntryId);
     }
+  }
+
+  async function handleStartUpload(options?: { reuseCurrentEntry?: boolean }) {
+    if (!selectedFile) {
+      setErrorMessage('Pick an audio file first.');
+      return;
+    }
+
+    await runUploadPipeline(selectedFile, options);
   }
 
   async function handleRetry() {
@@ -1189,6 +1309,27 @@ export function AppPage() {
       setRetryAction(null);
       setPipelineState('transcribing');
       await pollUntilComplete(entryId);
+    }
+  }
+
+  async function handleArchiveEntry() {
+    if (!entryId || isArchivingEntry) {
+      return;
+    }
+
+    setIsArchivingEntry(true);
+    setArchiveError(null);
+    setArchiveNotice(null);
+
+    try {
+      const archived = await archiveEntry(entryId);
+      setEntryStatus(archived.status);
+      upsertTimelineEntry(entryId, { status: archived.status });
+      setArchiveNotice('Entry archived.');
+    } catch (error) {
+      setArchiveError(error instanceof Error ? error.message : 'Failed to archive entry.');
+    } finally {
+      setIsArchivingEntry(false);
     }
   }
 
@@ -1228,6 +1369,8 @@ export function AppPage() {
     try {
       const transcript = await updateEntryTranscript(entryId, nextText);
       setEntryTranscript(transcript.text);
+      setCaptureTranscriptPreview(transcript.text);
+      setCaptureTranscriptFinalized(true);
       setTranscriptVersion(transcript.version);
       setIsTranscriptEdited(true);
       setIsEditingTranscript(false);
@@ -1553,6 +1696,25 @@ export function AppPage() {
   }
 
   const isBusy = pipelineState === 'creating' || pipelineState === 'uploading' || pipelineState === 'transcribing';
+  const isCaptureBuffering = pipelineState === 'creating' || pipelineState === 'uploading' || pipelineState === 'transcribing';
+  const normalizedEntryStatus = normalizeStatus(entryStatus);
+  const isEntryArchived = normalizedEntryStatus === 'archived';
+  const canArchiveEntry = Boolean(entryId) && pipelineState === 'ready' && !isEntryArchived;
+  const captureStatusLabel = isRecording
+    ? 'Recording'
+    : pipelineState === 'creating'
+      ? 'Creating entry'
+      : pipelineState === 'uploading'
+        ? 'Uploading audio'
+        : pipelineState === 'transcribing'
+          ? 'Transcribing'
+          : pipelineState === 'ready'
+            ? isEntryArchived
+              ? 'Archived'
+              : 'Ready'
+            : pipelineState === 'error'
+              ? 'Error'
+              : 'Idle';
   const currentTimelineEntry = entryId ? timelineByEntry[entryId] : null;
   const currentIndexing = entryId
     ? indexingByEntry[entryId] ?? (currentTimelineEntry?.type && currentTimelineEntry?.context
@@ -2040,14 +2202,18 @@ export function AppPage() {
             <div className="space-y-4 border-t-2 border-foreground pt-4">
               <p className="text-sm font-medium">
                 Status:{' '}
-                <span className={isRecording ? 'text-foreground' : 'text-muted-foreground'}>
-                  {isRecording ? 'Recording' : 'Idle'}
-                </span>
+                <span className={isRecording || isCaptureBuffering ? 'text-foreground' : 'text-muted-foreground'}>{captureStatusLabel}</span>
               </p>
               <p className="text-sm text-muted-foreground">Timer: {formatDuration(elapsedSeconds)}</p>
               <p className="text-xs uppercase tracking-[0.1em] text-muted-foreground">
                 Press the mic to {isRecording ? 'stop' : 'start'} recording.
               </p>
+              {isCaptureBuffering ? (
+                <div className="flex items-center gap-3 rounded-none border border-foreground/70 bg-muted/30 px-3 py-2 text-sm">
+                  <span className="capture-buffering-icon" aria-hidden="true" />
+                  <span className="text-foreground">Transcribing in progress...</span>
+                </div>
+              ) : null}
               {recordingError !== null ? (
                 <p className="text-sm text-foreground" role="alert">
                   {recordingError}
@@ -2058,6 +2224,31 @@ export function AppPage() {
                   <audio controls className="w-full" src={recordingUrl} />
                 </div>
               ) : null}
+              {captureTranscriptPreview.trim().length > 0 || pipelineState === 'transcribing' ? (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="mono-kicker">Live transcript preview</p>
+                    {captureTranscriptFinalized ? (
+                      <span className="text-[10px] uppercase tracking-[0.1em] text-muted-foreground">finalized</span>
+                    ) : null}
+                  </div>
+                  <div className="capture-preview-fade relative rounded-none border border-foreground/80 bg-background p-3">
+                    <p className="capture-preview-text whitespace-pre-wrap text-sm text-foreground">
+                      {captureTranscriptPreview.trim().length > 0 ? captureTranscriptPreview : 'Listening for words...'}
+                    </p>
+                  </div>
+                </div>
+              ) : null}
+              {canArchiveEntry ? (
+                <div className="flex flex-wrap items-center gap-3">
+                  <Button onClick={() => void handleArchiveEntry()} disabled={isArchivingEntry}>
+                    {isArchivingEntry ? 'Archiving...' : 'Archive'}
+                  </Button>
+                  <p className="text-xs text-muted-foreground">Archive this entry to trigger downstream processing workflows.</p>
+                </div>
+              ) : null}
+              {archiveNotice ? <p className="text-sm text-foreground">{archiveNotice}</p> : null}
+              {archiveError ? <p className="text-sm text-foreground">{archiveError}</p> : null}
             </div>
           </article>
 
@@ -2145,17 +2336,12 @@ export function AppPage() {
                     };
                     return (
                       <article key={source.snippetId} className="border border-foreground p-3">
-                        <p className="text-xs text-muted-foreground">
-                          Entry: {source.entryId}
-                          {sourceDate ? ` | ${formatTimelineDate(sourceDate)}` : ''}
-                        </p>
+                        <p className="text-xs text-muted-foreground">{sourceDate ? formatTimelineDate(sourceDate) : 'Unknown date'}</p>
                         <p className="mt-2 text-sm">{source.snippetText}</p>
                         <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-                          <p className="text-xs text-muted-foreground">
-                            Source offsets: {source.startChar}-{source.endChar}
-                          </p>
+                          <span />
                           <Button size="sm" variant="outline" onClick={() => openAskCitation(citation)}>
-                            Open source
+                            Explore this Day
                           </Button>
                         </div>
                       </article>
@@ -2428,7 +2614,7 @@ export function AppPage() {
                   Duration
                 </text>
               </svg>
-              <p className="mt-3 text-xs text-muted-foreground">Smooth spline with circular markers. Click a marker to open that entry detail.</p>
+              <p className="mt-3 text-xs text-muted-foreground">Click a marker to open that entry detail.</p>
             </div>
           ) : filteredTimelineEntries.length > 0 ? (
             <p className="text-sm text-muted-foreground">No recording durations are available for the selected filters yet.</p>

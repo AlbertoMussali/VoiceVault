@@ -1,37 +1,217 @@
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Playfair+Display:ital,wght@0,500;0,700;0,800;1,500&family=Source+Serif+4:ital,wght@0,400;0,500;0,600;1,400&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 @layer base {
   :root {
-    --background: 210 40% 98%;
-    --foreground: 222.2 84% 4.9%;
-    --card: 0 0% 100%;
-    --card-foreground: 222.2 84% 4.9%;
-    --primary: 184 73% 27%;
-    --primary-foreground: 0 0% 98%;
-    --secondary: 203 23% 91%;
-    --secondary-foreground: 222.2 47.4% 11.2%;
-    --muted: 210 40% 96%;
-    --muted-foreground: 215.4 16.3% 46.9%;
-    --accent: 201 94% 86%;
-    --accent-foreground: 222.2 47.4% 11.2%;
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 210 40% 98%;
-    --border: 214.3 31.8% 91.4%;
-    --input: 214.3 31.8% 91.4%;
-    --ring: 184 73% 27%;
-    --radius: 0.6rem;
+    --background: #ffffff;
+    --foreground: #000000;
+    --card: #ffffff;
+    --card-foreground: #000000;
+    --primary: #000000;
+    --primary-foreground: #ffffff;
+    --secondary: #f5f5f5;
+    --secondary-foreground: #000000;
+    --muted: #f5f5f5;
+    --muted-foreground: #525252;
+    --accent: #000000;
+    --accent-foreground: #ffffff;
+    --destructive: #000000;
+    --destructive-foreground: #ffffff;
+    --border: #000000;
+    --input: #000000;
+    --ring: #000000;
+    --radius: 0px;
+    --border-light: #e5e5e5;
   }
 
   * {
     @apply border-border;
+    border-radius: 0;
   }
 
   body {
     @apply bg-background text-foreground antialiased;
     margin: 0;
     min-height: 100vh;
-    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    font-family: 'Source Serif 4', Georgia, serif;
+    position: relative;
+  }
+
+  body::before {
+    content: '';
+    inset: 0;
+    pointer-events: none;
+    position: fixed;
+    z-index: -1;
+    background-image: repeating-linear-gradient(0deg, transparent, transparent 1px, #000 1px, #000 2px);
+    background-size: 100% 4px;
+    opacity: 0.015;
+  }
+
+  body::after {
+    content: '';
+    inset: 0;
+    pointer-events: none;
+    position: fixed;
+    z-index: -1;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
+    opacity: 0.02;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    font-family: 'Playfair Display', Georgia, serif;
+    letter-spacing: -0.025em;
+  }
+
+  code,
+  pre,
+  .font-mono {
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  a {
+    text-underline-offset: 0.2em;
+  }
+
+  input,
+  textarea,
+  select {
+    border: 2px solid var(--foreground);
+    border-radius: 0;
+    background: var(--background);
+    color: var(--foreground);
+  }
+
+  input::placeholder,
+  textarea::placeholder {
+    color: var(--muted-foreground);
+    font-style: italic;
+  }
+
+  input:focus-visible,
+  textarea:focus-visible,
+  select:focus-visible {
+    border-color: var(--foreground);
+    outline: none;
+    box-shadow: none;
+  }
+
+  input[type='date'],
+  input[type='search'],
+  input[type='password'],
+  input[type='email'],
+  input[type='text'] {
+    border-width: 0 0 2px 0;
+  }
+
+  input[type='date']:focus-visible,
+  input[type='search']:focus-visible,
+  input[type='password']:focus-visible,
+  input[type='email']:focus-visible,
+  input[type='text']:focus-visible {
+    border-bottom-width: 4px;
+  }
+
+  input[type='checkbox'] {
+    min-height: 1.05rem;
+    min-width: 1.05rem;
+  }
+}
+
+@layer components {
+  .mono-page {
+    @apply min-h-screen bg-background text-foreground px-6 py-8 md:px-8 lg:px-12;
+  }
+
+  .mono-shell {
+    @apply mx-auto w-full max-w-6xl border border-foreground bg-background px-6 py-10 md:px-10 md:py-14;
+  }
+
+  .mono-section {
+    @apply border border-foreground bg-background p-6 md:p-8;
+  }
+
+  .mono-rule {
+    @apply my-10 h-1 w-full bg-foreground md:my-14;
+  }
+
+  .mono-kicker {
+    @apply text-xs uppercase tracking-[0.1em] text-muted-foreground;
+  }
+
+  .mono-invert {
+    @apply bg-foreground text-background;
+    position: relative;
+  }
+
+  .mono-invert::before {
+    content: '';
+    inset: 0;
+    position: absolute;
+    pointer-events: none;
+    background-image: repeating-linear-gradient(90deg, transparent, transparent 1px, #fff 1px, #fff 2px);
+    background-size: 4px 100%;
+    opacity: 0.03;
+  }
+
+  .mono-pull-quote {
+    @apply text-3xl italic leading-tight tracking-tight md:text-5xl;
+    font-family: 'Playfair Display', Georgia, serif;
+  }
+
+  .mono-dropcap::first-letter {
+    border: 2px solid #000;
+    float: left;
+    font-family: 'Playfair Display', Georgia, serif;
+    font-size: 3.75rem;
+    line-height: 0.9;
+    margin: 0.2rem 0.75rem 0 0;
+    padding: 0.25rem 0.5rem;
+  }
+
+  .capture-buffering-icon {
+    width: 1rem;
+    height: 1rem;
+    border-radius: 9999px;
+    border: 2px solid rgba(0, 0, 0, 0.25);
+    border-top-color: rgba(0, 0, 0, 1);
+    animation: capture-spin 0.8s linear infinite;
+    flex-shrink: 0;
+  }
+
+  .capture-preview-text {
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-line-clamp: 5;
+    -webkit-box-orient: vertical;
+    line-height: 1.4;
+    min-height: calc(1.4em * 2);
+    max-height: calc(1.4em * 5);
+  }
+
+  .capture-preview-fade::after {
+    content: '';
+    position: absolute;
+    pointer-events: none;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 2.8rem;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0), rgba(245, 245, 245, 0.95));
+  }
+}
+
+@keyframes capture-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
   }
 }

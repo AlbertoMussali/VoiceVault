@@ -530,6 +530,15 @@ export async function deleteEntry(entryId: string): Promise<void> {
   }
 }
 
+export async function archiveEntry(entryId: string): Promise<EntryStatusResponse> {
+  const payload = await authorizedFetch(`/api/v1/entries/${entryId}/archive`, { method: 'POST' });
+  return {
+    entryId: pickEntryId(payload) ?? entryId,
+    status: pickEntryStatus(payload),
+    title: pickEntryTitle(payload)
+  };
+}
+
 export async function updateEntryTranscript(entryId: string, transcriptText: string): Promise<TranscriptResponse> {
   const payload = await authorizedFetch(`/api/v1/entries/${entryId}/transcript`, {
     method: 'PATCH',

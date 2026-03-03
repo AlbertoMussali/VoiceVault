@@ -264,6 +264,34 @@ def delete_entry(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+@router.post("/{entry_id}/archive")
+def archive_entry(
+    entry_id: uuid.UUID,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict[str, str | None]:
+    user_id = resolve_request_user_id(request, db)
+    entry = db.get(Entry, entry_id)
+    if entry is None or entry.user_id != user_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
+
+    previous_status = entry.status
+    entry.status = "archived"
+    db.add(
+        AuditLog(
+            user_id=user_id,
+            entry_id=entry_id,
+            event_type="entry_archived",
+            metadata_json={
+                "previous_status": previous_status,
+            },
+        )
+    )
+    db.commit()
+    db.refresh(entry)
+    return {"entry_id": str(entry.id), "status": entry.status, "title": entry.title}
+
+
 @router.patch("/{entry_id}/transcript")
 def patch_entry_transcript(
     entry_id: uuid.UUID,
