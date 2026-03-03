@@ -33,6 +33,7 @@ OPENAI_BASE_URL="${OPENAI_BASE_URL:-https://api.openai.com/v1}"
 OPENAI_STT_MODEL="${OPENAI_STT_MODEL:-gpt-4o-mini-transcribe}"
 OPENAI_SUMMARY_MODEL="${OPENAI_SUMMARY_MODEL:-gpt-4o-mini}"
 OPENAI_INDEXING_MODEL="${OPENAI_INDEXING_MODEL:-gpt-4o-mini}"
+PGGSSENCMODE="${PGGSSENCMODE:-disable}"
 
 INSTALL_DEPS=1
 RUN_MIGRATIONS=1
@@ -214,13 +215,13 @@ if [[ "$RUN_MIGRATIONS" -eq 1 ]]; then
   log "Running Alembic migrations..."
   (
     cd "$ROOT_DIR/apps/api"
-    DATABASE_URL="$DATABASE_URL" uv run --no-project --python "$API_PYTHON" --with-requirements requirements.txt alembic upgrade head
+    DATABASE_URL="$DATABASE_URL" PGGSSENCMODE="$PGGSSENCMODE" uv run --no-project --python "$API_PYTHON" --with-requirements requirements.txt alembic upgrade head
   )
 fi
 
 log "Launching API, worker, and web dev server..."
-start_process "api" "cd \"$ROOT_DIR/apps/api\" && DATABASE_URL=\"$DATABASE_URL\" REDIS_URL=\"$REDIS_URL\" DEMO_SEED_ENABLED=\"$DEMO_SEED_ENABLED\" DEMO_SEED_EMAIL=\"$DEMO_SEED_EMAIL\" DEMO_SEED_PASSWORD=\"$DEMO_SEED_PASSWORD\" DEMO_SEED_DAYS=\"$DEMO_SEED_DAYS\" OPENAI_API_KEY=\"$OPENAI_API_KEY\" OPENAI_BASE_URL=\"$OPENAI_BASE_URL\" OPENAI_STT_MODEL=\"$OPENAI_STT_MODEL\" OPENAI_SUMMARY_MODEL=\"$OPENAI_SUMMARY_MODEL\" OPENAI_INDEXING_MODEL=\"$OPENAI_INDEXING_MODEL\" uv run --no-project --python \"$API_PYTHON\" --with-requirements requirements.txt uvicorn app.main:app --host 0.0.0.0 --port \"$API_PORT\" --reload"
-start_process "worker" "cd \"$ROOT_DIR/apps/api\" && DATABASE_URL=\"$DATABASE_URL\" REDIS_URL=\"$REDIS_URL\" OPENAI_API_KEY=\"$OPENAI_API_KEY\" OPENAI_BASE_URL=\"$OPENAI_BASE_URL\" OPENAI_STT_MODEL=\"$OPENAI_STT_MODEL\" OPENAI_SUMMARY_MODEL=\"$OPENAI_SUMMARY_MODEL\" OPENAI_INDEXING_MODEL=\"$OPENAI_INDEXING_MODEL\" uv run --no-project --python \"$API_PYTHON\" --with-requirements requirements.txt python -m app.worker"
+start_process "api" "cd \"$ROOT_DIR/apps/api\" && DATABASE_URL=\"$DATABASE_URL\" REDIS_URL=\"$REDIS_URL\" DEMO_SEED_ENABLED=\"$DEMO_SEED_ENABLED\" DEMO_SEED_EMAIL=\"$DEMO_SEED_EMAIL\" DEMO_SEED_PASSWORD=\"$DEMO_SEED_PASSWORD\" DEMO_SEED_DAYS=\"$DEMO_SEED_DAYS\" OPENAI_API_KEY=\"$OPENAI_API_KEY\" OPENAI_BASE_URL=\"$OPENAI_BASE_URL\" OPENAI_STT_MODEL=\"$OPENAI_STT_MODEL\" OPENAI_SUMMARY_MODEL=\"$OPENAI_SUMMARY_MODEL\" OPENAI_INDEXING_MODEL=\"$OPENAI_INDEXING_MODEL\" PGGSSENCMODE=\"$PGGSSENCMODE\" uv run --no-project --python \"$API_PYTHON\" --with-requirements requirements.txt uvicorn app.main:app --host 0.0.0.0 --port \"$API_PORT\" --reload"
+start_process "worker" "cd \"$ROOT_DIR/apps/api\" && DATABASE_URL=\"$DATABASE_URL\" REDIS_URL=\"$REDIS_URL\" OPENAI_API_KEY=\"$OPENAI_API_KEY\" OPENAI_BASE_URL=\"$OPENAI_BASE_URL\" OPENAI_STT_MODEL=\"$OPENAI_STT_MODEL\" OPENAI_SUMMARY_MODEL=\"$OPENAI_SUMMARY_MODEL\" OPENAI_INDEXING_MODEL=\"$OPENAI_INDEXING_MODEL\" PGGSSENCMODE=\"$PGGSSENCMODE\" uv run --no-project --python \"$API_PYTHON\" --with-requirements requirements.txt python -m app.worker"
 start_process "web" "cd \"$ROOT_DIR/apps/web\" && VITE_API_BASE_URL=\"$VITE_API_BASE_URL\" npm run dev -- --host 0.0.0.0 --port \"$WEB_PORT\""
 
 log "VoiceVault local dev stack is running."
