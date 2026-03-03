@@ -1,4 +1,8 @@
-## VoiceVault Local Development
+# VoiceVault
+
+VoiceVault is a monorepo for a voice-first journaling workflow with a FastAPI backend and React frontend.
+
+## Local Development
 
 Run the full local development stack from the repo root:
 
