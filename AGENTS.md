@@ -6,15 +6,17 @@ VoiceVault is a small monorepo with Python backend and React frontend apps.
 - `apps/web/`: Vite + React + TypeScript client (`src/` for UI code and styles).
 - `infra/`: local infrastructure config (`docker-compose.dev.yml`).
 - `docs/`: process and quality docs (for example, definition of done).
-- Root files: `Makefile`, `pyproject.toml`, `.env.example`, and task/planning docs.
+- Root files: `Makefile`, `pyproject.toml`, `.env.example`, `README.md`, and `LICENSE`.
 
 ## Build, Test, and Development Commands
 Use `uv` for all Python package/runtime operations.
 - Install/remove Python packages: `uv add <pkg>` / `uv remove <pkg>` (do not use `pip install` directly).
-- Run Python entrypoints/scripts/tests: `uv run python main.py`, `uv run python -m unittest discover -s apps/api/tests`.
+- Run backend tests: `uv run python -m unittest discover -s apps/api/tests`.
+- Run the full local dev stack: `./scripts/dev-local.sh` or `make dev-local`.
 - Frontend dev server: `cd apps/web && npm run dev`.
 - Frontend production build: `cd apps/web && npm run build`.
-- Backend migrations (Docker): `docker compose run --rm api sh -lc 'cd /app/apps/api && alembic upgrade head'`.
+- Frontend tests: `cd apps/web && npm test`.
+- Backend migrations (local Postgres): `cd apps/api && DATABASE_URL=postgresql+psycopg://voicevault:voicevault@localhost:5432/voicevault_dev uv run --no-project --python 3.13 --with-requirements requirements.txt alembic upgrade head`.
 - Make targets (`make dev-up`, `make dev-down`) are helper wrappers; verify their behavior before relying on them in CI.
 
 ## Coding Style & Naming Conventions
@@ -26,7 +28,8 @@ Use `uv` for all Python package/runtime operations.
 ## Testing Guidelines
 - Backend tests use `unittest`; test files follow `test_*.py`.
 - Run backend tests with `uv run python -m unittest discover -s apps/api/tests`.
-- Frontend test tooling is not yet configured; when adding it, place tests next to components or under `apps/web/src/__tests__/`.
+- Frontend tests use Vitest; run them with `cd apps/web && npm test`.
+- Frontend tests live next to components or under `apps/web/src/__tests__/`.
 - For backend changes, include at least one test covering new behavior or migration wiring.
 
 ## Commit & Pull Request Guidelines
